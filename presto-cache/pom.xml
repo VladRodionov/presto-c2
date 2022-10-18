@@ -13,6 +13,7 @@
 
     <properties>
         <air.main.basedir>${project.parent.basedir}</air.main.basedir>
+	<air.check.skip-duplicate-finder>true</air.check.skip-duplicate-finder>
     </properties>
 
     <dependencies>
@@ -81,7 +82,10 @@
             <groupId>org.alluxio</groupId>
             <artifactId>alluxio-shaded-client</artifactId>
         </dependency>
-
+     	<dependency>
+            <groupId>org.bigbase</groupId>
+            <artifactId>carrot-cache</artifactId>
+        </dependency>
         <!-- Presto SPI -->
         <dependency>
             <groupId>com.facebook.presto</groupId>
@@ -136,6 +140,11 @@
         <dependency>
             <groupId>org.testng</groupId>
             <artifactId>testng</artifactId>
+            <scope>test</scope>
+        </dependency>
+    	<dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-math3</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

@@ -78,6 +78,25 @@ public class TestingCacheUtils
         }
     }
 
+    public static void stressTestSingleThread(byte[] data,
+        TestingReadOperation testingReadOperation) throws ExecutionException, InterruptedException {
+
+      byte[] buffer = new byte[data.length];
+      Random random = new Random();
+      for (int j = 0; j < 200; j++) {
+        int position = random.nextInt(data.length - 1);
+        int length = random.nextInt(max((data.length - position) / 3, 1));
+        int offset = random.nextInt(data.length - length);
+
+        try {
+          testingReadOperation.invoke(position, buffer, offset, length);
+        } catch (IOException e) {
+          fail(e.getMessage());
+          return;
+        }
+        validateBuffer(data, position, buffer, offset, length);
+      }
+    }
     public interface TestingReadOperation
     {
         void invoke(long position, byte[] buffer, int offset, int length) throws IOException;

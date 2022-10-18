@@ -11,11 +11,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.facebook.presto.cache;
+package com.facebook.presto.cache.carrot;
 
-public enum CacheType
+public enum EvictionPolicy
 {
-    FILE_MERGE,
-    ALLUXIO,
-    CARROT /* Carrot Cache*/
+    FIFO("com.carrot.cache.eviction.FIFOEvictionPolicy"),
+    SLRU("com.carrot.cache.eviction.SLRUEvictionPolicy"),
+    LRU("com.carrot.cache.eviction.LRUEvictionPolicy");
+
+    private final String className;
+
+    EvictionPolicy(String className)
+    {
+        this.className = className;
+    }
+
+    public String getClassName()
+    {
+        return className;
+    }
 }
