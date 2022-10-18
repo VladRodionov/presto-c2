@@ -60,7 +60,7 @@ public class CarrotCachingInputStream extends InputStream
   /** I/O buffer size in bytes */
   private int bufferSize;
 
-  /** I/O buffer*/
+  /** I/O buffer to read from cache*/
   private byte[] buffer = null;
   
   /* Used to read page from the external stream */
@@ -206,7 +206,6 @@ public class CarrotCachingInputStream extends InputStream
     return dataReadFromBuffer;
   }
 
-  static ReentrantLock lock = new ReentrantLock();
   
   private int localCachedRead(byte[] bytesBuffer, int offset, int length, 
                               long position) throws IOException {
@@ -218,15 +217,10 @@ public class CarrotCachingInputStream extends InputStream
     int bytesToReadInPage = Math.min(bytesLeftInPage, length);
     byte[] key = getKey(currentPage * pageSize);
     
-    try {
-      //lock.lock();
-      int bytesRead = (int) cache.getRange(key, 0, key.length, currentPageOffset, bytesToReadInPage,
+    int bytesRead = (int) cache.getRange(key, 0, key.length, currentPageOffset, bytesToReadInPage,
         true, bytesBuffer, offset);
-      if (bytesRead > 0) {
-        return bytesRead;
-      }
-    } finally {
-      //lock.unlock();
+    if (bytesRead > 0) {
+      return bytesRead;
     }
     // on local cache miss, read a  from external storage. This will always make
     // progress or throw an exception
