@@ -27,7 +27,6 @@ public class CarrotCacheConfig
     public static String CACHE_NAME = "data-cache";
     
     private boolean metricsCollectionEnabled = false;
-    private String jmxClass = "carrot.metrics.sink.JmxSink";// dummy thing yet
     private String metricsDomain = "com.facebook.carrot";
     private DataSize maxCacheSize = new DataSize(500, GIGABYTE);
     private DataSize dataSegmentSize = new DataSize(128, Unit.MEGABYTE);
@@ -69,19 +68,6 @@ public class CarrotCacheConfig
     public CarrotCacheConfig setMetricsCollectionEnabled(boolean metricsCollectionEnabled)
     {
         this.metricsCollectionEnabled = metricsCollectionEnabled;
-        return this;
-    }
-
-    public String getJmxClass()
-    {
-        return jmxClass;
-    }
-
-    @Config("cache.carrot.jmx-class")
-    @ConfigDescription("JMX class name used by the carrot caching for metrics")
-    public CarrotCacheConfig setJmxClass(String jmxClass)
-    {
-        this.jmxClass = jmxClass;
         return this;
     }
 

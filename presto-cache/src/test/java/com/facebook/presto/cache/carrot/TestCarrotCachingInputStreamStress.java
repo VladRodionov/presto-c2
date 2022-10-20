@@ -16,15 +16,12 @@ package com.facebook.presto.cache.carrot;
 import static com.facebook.presto.cache.CacheType.CARROT;
 import static com.google.common.base.Preconditions.checkState;
 import static java.nio.file.Files.createTempDirectory;
-import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertTrue;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.lang.management.ManagementFactory;
 import java.net.URI;
-import java.nio.ByteBuffer;
 import java.util.Random;
 
 import javax.management.MBeanServer;
@@ -50,21 +47,19 @@ import io.airlift.units.DataSize;
 import io.airlift.units.DataSize.Unit;
 
 @Test(singleThreaded = true)
-public class TestCarrotCachingInputStream {
-  
-  protected boolean fillFile = false;
-  
+public class TestCarrotCachingInputStreamStress {
+    
   private static final Logger LOG = Logger.get(TestCarrotCachingInputStream.class);
 
   private URI cacheDirectory;
   
   private File sourceFile;
   
-  private DataSize cacheSize = new DataSize(4, Unit.GIGABYTE);
+  private DataSize cacheSize = new DataSize(500, Unit.GIGABYTE);
   
-  private DataSize cacheSegmentSize = new DataSize(20, Unit.MEGABYTE);
+  private DataSize cacheSegmentSize = new DataSize(128, Unit.MEGABYTE);
   
-  private DataSize fileSize = new DataSize(10, Unit.GIGABYTE);
+  private DataSize fileSize = new DataSize(2000, Unit.GIGABYTE);
 
   private double zipfAlpha = 0.9;
   
@@ -79,9 +74,6 @@ public class TestCarrotCachingInputStream {
   @BeforeClass
   public void setupClass() throws IOException {
     this.sourceFile = TestUtils.createTempFile();
-    if (fillFile) {
-      TestUtils.fillRandom(sourceFile, fileSize.toBytes());
-    }
   }
   
   @AfterClass
@@ -155,18 +147,6 @@ public class TestCarrotCachingInputStream {
     }
   }
   
-  @Test
-  public void testCarrotCachingInputStreamACDisabled () throws IOException {
-    System.out.printf("Java version=%d\n", Utils.getJavaVersion());
-    this.cache = createCache(false);
-    runTestRandomAccess();
-  }
-  
-  @Test
-  public void testCarrotCachingInputStreamACEnabledSeq () throws IOException {
-    this.cache = createCache(true);
-    runTestRandomSequentialAccess();
-  }
   
   @Test
   public void testCarrotCachingInputStreamACEnabled () throws IOException {
@@ -193,29 +173,7 @@ public class TestCarrotCachingInputStream {
     }
   }
 
-  @Test
-  public void testCarrotCachingInputStreamACDisabledSeq () throws IOException {
-    this.cache = createCache(false);
-    runTestRandomSequentialAccess();
-  }
-  
-  @Test
-  public void testCarrotCachingInputStreamNotPositionalReads() throws IOException {
-    this.cache = createCache(false);
-    runTestSequentialAccess();
-  }
-  
-  @Test
-  public void testCarrotCachingInputStreamHeapByteBuffer() throws IOException {
-    this.cache = createCache(false);
-    runTestSequentialAccessByteBuffer(false);
-  }
-  
-  @Test
-  public void testCarrotCachingInputStreamDirectByteBuffer() throws IOException {
-    this.cache = createCache(false);
-    runTestSequentialAccessByteBuffer(true);
-  }
+
   
   protected FSDataInputStream getExternalStream() throws IOException {
     return new FSDataInputStream(new VirtualFileInputStream(fileSize.toBytes()));
@@ -233,7 +191,7 @@ public class TestCarrotCachingInputStream {
       int numRecords = (int) (fileSize.toBytes() / pageSize);
       ZipfDistribution dist = new ZipfDistribution(numRecords, this.zipfAlpha);
 
-      int numIterations = numRecords * 10;
+      int numIterations = numRecords * 1000;
 
       Random r = new Random();
       byte[] buffer = new byte[pageSize];
@@ -271,124 +229,6 @@ public class TestCarrotCachingInputStream {
       }
       long endTime = System.currentTimeMillis();
       LOG.info("Test finished in %dms total read=%d", (endTime - startTime), totalRead);
-      TestUtils.printStats(cache);
-    }
-  }
-  
-  private void runTestRandomSequentialAccess() throws IOException {
-    FSDataInputStream extStream = getExternalStream();
-    long fileLength = fileSize.toBytes();
-
-    try (CarrotCachingInputStream carrotStream = new CarrotCachingInputStream(cache,
-        new Path(this.sourceFile.toURI()), extStream, fileLength, pageSize, ioBufferSize);) {
-
-      FSDataInputStream cacheStream = new FSDataInputStream(carrotStream);
-      int numRecords = (int) (fileSize.toBytes() / pageSize);
-      ZipfDistribution dist = new ZipfDistribution(numRecords, this.zipfAlpha);
-
-      int numIterations = numRecords * 10;
-
-      Random r = new Random();
-      byte[] buffer = new byte[pageSize];
-      byte[] controlBuffer = new byte[pageSize];
-      long startTime = System.currentTimeMillis();
-      long totalRead = 0;
-      for (int i = 0; i < numIterations; i++) {
-        int accessSize = 8 * 1024;
-        long n = dist.sample();
-        long offset = (n - 1) * pageSize;
-        int requestOffset = r.nextInt(pageSize);
-        int requestSize = this.ioBufferSize;
-        offset += requestOffset;
-        requestSize = (int) Math.min(requestSize, fileLength - offset);
-        long t1 = System.nanoTime();
-        int m = requestSize / accessSize;
-        if (m == 0) {
-          accessSize = requestSize;
-        }
-        for (int k = 0; k < m; k++) {
-
-          extStream.readFully(offset, controlBuffer, 0, accessSize);
-          cacheStream.readFully(offset, buffer, 0, accessSize);
-          assertTrue(Utils.compareTo(buffer, 0, accessSize, controlBuffer, 0, accessSize) == 0);
-          offset += accessSize;
-          totalRead += accessSize;
-        }
-        long t2 = System.nanoTime();
-
-        if (i > 0 && i % 10000 == 0) {
-          LOG.info("read %d offset=%d size=%d  read time=%d", i, offset, requestSize,
-            (t2 - t1) / 1000);
-        }
-      }
-      long endTime = System.currentTimeMillis();
-      LOG.info("Test finished in %dms total read=%d", (endTime - startTime), totalRead);
-      TestUtils.printStats(cache);
-    }
-  }
-  
-  private void runTestSequentialAccess() throws IOException {
-    FSDataInputStream extStream = getExternalStream();
-    long fileLength = fileSize.toBytes();
-
-    try (CarrotCachingInputStream carrotStream = new CarrotCachingInputStream(cache,
-        new Path(this.sourceFile.toURI()), extStream, fileLength, pageSize, ioBufferSize);) {
-
-      FSDataInputStream cacheStream = new FSDataInputStream(carrotStream);
-      int requestSize = 8 * 1024;
-      int numRecords = 1000;
-      byte[] buffer = new byte[pageSize];
-      byte[] controlBuffer = new byte[pageSize];
-      long startTime = System.currentTimeMillis();
-      long totalRead = 0;
-      for (int i = 0; i < numRecords; i++) {
-
-        int readExt =  extStream.read(controlBuffer, 0, requestSize);
-        int readCache = cacheStream.read(buffer, 0, requestSize);
-        //LOG.info("ext pos=%d cache pos=%d\n", extStream.getPos(), cacheStream.getPos());
-        assertEquals(readExt, requestSize);
-        assertEquals(readCache, requestSize);
-        assertTrue(Utils.compareTo(buffer, 0, requestSize, controlBuffer, 0, requestSize) == 0);
-        assertEquals(extStream.getPos(), cacheStream.getPos());
-        if ( i > 0 && i % 100000 == 0) {
-          LOG.info("read %d", i);
-        }
-      }
-      long endTime = System.currentTimeMillis();
-      LOG.info("Test finished in %dms total read requests=%d", (endTime - startTime), totalRead);
-      TestUtils.printStats(cache);
-    }
-  }
-  
-  private void runTestSequentialAccessByteBuffer(boolean direct) throws IOException {
-    FSDataInputStream extStream = getExternalStream();
-    long fileLength = fileSize.toBytes();
-
-    try (CarrotCachingInputStream carrotStream = new CarrotCachingInputStream(cache,
-        new Path(this.sourceFile.toURI()), extStream, fileLength, pageSize, ioBufferSize);) {
-
-      FSDataInputStream cacheStream = new FSDataInputStream(carrotStream);
-      int requestSize = 8 * 1024;
-      int numRecords = 1000;
-      ByteBuffer buffer = direct? ByteBuffer.allocateDirect(requestSize): ByteBuffer.allocate(requestSize);
-      byte[] controlBuffer = new byte[requestSize];
-      long startTime = System.currentTimeMillis();
-      for (int i = 0; i < numRecords; i++) {
-
-        int readExt =  extStream.read(controlBuffer);
-        int readCache = cacheStream.read(buffer);
-        assertEquals(readExt, requestSize);
-        assertEquals(readCache, requestSize);
-        assertEquals(extStream.getPos(), cacheStream.getPos());
-        buffer.flip();
-        assertTrue(Utils.compareTo(buffer, requestSize, controlBuffer, 0, requestSize) == 0);
-        if ( i > 0 && i % 100000 == 0) {
-          LOG.info("read %d", i);
-        }
-        buffer.clear();
-      }
-      long endTime = System.currentTimeMillis();
-      LOG.info("Test finished in %dms total read requests=%d", (endTime - startTime), numRecords);
       TestUtils.printStats(cache);
     }
   }
