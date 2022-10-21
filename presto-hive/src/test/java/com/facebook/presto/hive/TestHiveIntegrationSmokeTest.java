@@ -212,7 +212,9 @@ public class TestHiveIntegrationSmokeTest
                         Optional.empty(),
                         ImmutableMap.of("hive", new SelectedRole(SelectedRole.Type.ROLE, Optional.of("admin"))),
                         ImmutableMap.of(),
-                        ImmutableMap.of()))
+                        ImmutableMap.of(),
+                        Optional.empty(),
+                        Optional.empty()))
                 .build();
 
         assertUpdate(admin, "CREATE SCHEMA new_schema");
@@ -235,7 +237,9 @@ public class TestHiveIntegrationSmokeTest
                         Optional.empty(),
                         ImmutableMap.of("hive", new SelectedRole(SelectedRole.Type.ROLE, Optional.of("admin"))),
                         ImmutableMap.of(),
-                        ImmutableMap.of()))
+                        ImmutableMap.of(),
+                        Optional.empty(),
+                        Optional.empty()))
                 .build();
 
         assertUpdate(admin, "CREATE SCHEMA new_schema");

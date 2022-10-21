@@ -13,9 +13,12 @@
  */
 package com.facebook.presto.spi;
 
-import static com.facebook.presto.spi.ErrorType.INSUFFICIENT_RESOURCES;
-import static com.facebook.presto.spi.ErrorType.INTERNAL_ERROR;
-import static com.facebook.presto.spi.ErrorType.USER_ERROR;
+import com.facebook.presto.common.ErrorCode;
+import com.facebook.presto.common.ErrorType;
+
+import static com.facebook.presto.common.ErrorType.INSUFFICIENT_RESOURCES;
+import static com.facebook.presto.common.ErrorType.INTERNAL_ERROR;
+import static com.facebook.presto.common.ErrorType.USER_ERROR;
 
 public enum StandardErrorCode
         implements ErrorCodeSupplier
@@ -108,6 +111,7 @@ public enum StandardErrorCode
     INVALID_RETRY_EXECUTION_STRATEGY(0x0001_0025, INTERNAL_ERROR),
     PLAN_SERIALIZATION_ERROR(0x0001_0026, INTERNAL_ERROR),
     QUERY_PLANNING_TIMEOUT(0x0001_0027, INTERNAL_ERROR),
+    NATIVE_EXECUTION_TASK_ERROR(0x0001_0028, INTERNAL_ERROR),
 
     GENERIC_INSUFFICIENT_RESOURCES(0x0002_0000, INSUFFICIENT_RESOURCES),
     EXCEEDED_GLOBAL_MEMORY_LIMIT(0x0002_0001, INSUFFICIENT_RESOURCES),

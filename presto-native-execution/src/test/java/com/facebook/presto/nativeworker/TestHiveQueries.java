@@ -19,6 +19,7 @@ import com.google.common.collect.ImmutableMap;
 import org.testng.annotations.Test;
 
 import java.util.Map;
+import java.util.UUID;
 
 import static com.facebook.presto.common.type.BigintType.BIGINT;
 import static java.lang.String.format;
@@ -52,7 +53,7 @@ abstract class TestHiveQueries
             assertQuery("SELECT * FROM tmp");
         }
         finally {
-            dropTable("tmp");
+            dropTableIfExists("tmp");
         }
     }
 
@@ -570,21 +571,36 @@ abstract class TestHiveQueries
                 .setSystemProperty("table_writer_merge_operator_enabled", "false")
                 .setCatalogSessionProperty("hive", "collect_column_statistics_on_write", "false")
                 .build();
+        // Generate temporary table name.
+        String tmpTableName = "tmp_presto_" + UUID.randomUUID().toString().replace("-", "");
+        // Clean up if temporary table already exists.
+        dropTableIfExists(tmpTableName);
+        try {
+            getQueryRunner().execute(session, "CREATE TABLE " + tmpTableName + " AS SELECT * FROM nation");
+            assertQuery("SELECT * FROM " + tmpTableName, "SELECT * FROM nation");
+        }
+        finally {
+            dropTableIfExists(tmpTableName);
+        }
 
-        getQueryRunner().execute(session, "CREATE TABLE tmp AS SELECT * FROM nation");
-        assertQuery("SELECT * FROM tmp", "SELECT * FROM nation");
-        dropTable("tmp");
+        try {
+            getQueryRunner().execute(session, "CREATE TABLE " + tmpTableName + " AS SELECT linenumber, count(*) as cnt FROM lineitem GROUP BY 1");
+            assertQuery("SELECT * FROM " + tmpTableName, "SELECT linenumber, count(*) FROM lineitem GROUP BY 1");
+        }
+        finally {
+            dropTableIfExists(tmpTableName);
+        }
 
-        getQueryRunner().execute(session, "CREATE TABLE tmp AS SELECT linenumber, count(*) as cnt FROM lineitem GROUP BY 1");
-        assertQuery("SELECT * FROM tmp", "SELECT linenumber, count(*) FROM lineitem GROUP BY 1");
-        dropTable("tmp");
-
-        getQueryRunner().execute(session, "CREATE TABLE tmp AS SELECT orderkey, count(*) as cnt FROM lineitem GROUP BY 1");
-        assertQuery("SELECT * FROM tmp", "SELECT orderkey, count(*) FROM lineitem GROUP BY 1");
-        dropTable("tmp");
+        try {
+            getQueryRunner().execute(session, "CREATE TABLE " + tmpTableName + " AS SELECT orderkey, count(*) as cnt FROM lineitem GROUP BY 1");
+            assertQuery("SELECT * FROM " + tmpTableName, "SELECT orderkey, count(*) FROM lineitem GROUP BY 1");
+        }
+        finally {
+            dropTableIfExists(tmpTableName);
+        }
     }
 
-    private void dropTable(String tableName)
+    private void dropTableIfExists(String tableName)
     {
         // An ugly workaround for the lack of getExpectedQueryRunner()
         computeExpected("DROP TABLE IF EXISTS " + tableName, ImmutableList.of(BIGINT));
@@ -596,6 +612,9 @@ abstract class TestHiveQueries
         assertQuery("SELECT distinct orderkey FROM (" +
                 "SELECT orderkey FROM lineitem WHERE linenumber = 5 " +
                 "UNION ALL SELECT orderkey FROM lineitem WHERE linenumber = 6)");
+
+        assertQuery("WITH t AS (SELECT null as a, null as b UNION ALL SELECT 'xxx' as a, 12 as b) " +
+                "SELECT * FROM t, t as u WHERE t.a = u.a and t.b = u.b");
     }
 
     @Test

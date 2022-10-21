@@ -21,12 +21,16 @@ CPU_TARGET ?= "avx"
 CMAKE_PREFIX_PATH ?= "/usr/local"
 
 PRESTO_ENABLE_PARQUET ?= "OFF"
+PRESTO_ENABLE_HDFS ?= "OFF"
 
 CMAKE_FLAGS := -DTREAT_WARNINGS_AS_ERRORS=${TREAT_WARNINGS_AS_ERRORS}
 CMAKE_FLAGS += -DENABLE_ALL_WARNINGS=${ENABLE_WALL}
 CMAKE_FLAGS += -DCMAKE_PREFIX_PATH=$(CMAKE_PREFIX_PATH)
 CMAKE_FLAGS += -DCMAKE_BUILD_TYPE=$(BUILD_TYPE)
 CMAKE_FLAGS += -DPRESTO_ENABLE_PARQUET=$(PRESTO_ENABLE_PARQUET)
+CMAKE_FLAGS += -DPRESTO_ENABLE_HDFS=$(PRESTO_ENABLE_HDFS)
+
+SHELL := /bin/bash
 
 # Use Ninja if available. If Ninja is used, pass through parallelism control flags.
 USE_NINJA ?= 1
@@ -95,8 +99,8 @@ tidy-fix: cmake			#: Fix clang-tidy issues in the master branch
 tidy-check: cmake		#: Check clang-tidy issues in the master branch
 	pushd "$$(pwd)/.." && presto-native-execution/velox/scripts/check.py tidy master && popd
 
-circleci-container:			#: Build the linux container for CircleCi
-	$(MAKE) linux-container CONTAINER_NAME=circleci
+centos-container:			#: Build the linux container for CircleCi
+	$(MAKE) linux-container CONTAINER_NAME=centos
 
 linux-container:
 	rm -rf /tmp/docker && \
