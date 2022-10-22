@@ -16,6 +16,7 @@ package com.facebook.presto.cache;
 import com.facebook.presto.cache.alluxio.AlluxioCacheConfig;
 import com.facebook.presto.cache.alluxio.AlluxioCachingConfigurationProvider;
 import com.facebook.presto.cache.carrot.CarrotCacheConfig;
+import com.facebook.presto.cache.carrot.CarrotCachingConfigurationProvider;
 import com.facebook.presto.cache.filemerge.FileMergeCacheConfig;
 import com.facebook.presto.cache.filemerge.FileMergeCacheManager;
 import com.facebook.presto.hive.DynamicConfigurationProvider;
@@ -47,6 +48,7 @@ public class CachingModule
         configBinder(binder).bindConfig(CarrotCacheConfig.class);
 
         newSetBinder(binder, DynamicConfigurationProvider.class).addBinding().to(AlluxioCachingConfigurationProvider.class).in(Scopes.SINGLETON);
+        newSetBinder(binder, DynamicConfigurationProvider.class).addBinding().to(CarrotCachingConfigurationProvider.class).in(Scopes.SINGLETON);
 
         binder.bind(CacheFactory.class).in(Scopes.SINGLETON);
     }

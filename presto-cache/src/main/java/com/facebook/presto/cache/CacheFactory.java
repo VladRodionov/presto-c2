@@ -14,6 +14,7 @@
 package com.facebook.presto.cache;
 
 import com.facebook.presto.cache.alluxio.AlluxioCachingFileSystem;
+import com.facebook.presto.cache.carrot.CarrotCachingFileSystem;
 import com.facebook.presto.cache.filemerge.FileMergeCachingFileSystem;
 import com.facebook.presto.hive.filesystem.ExtendedFileSystem;
 import org.apache.hadoop.conf.Configuration;
@@ -53,6 +54,10 @@ public class CacheFactory
                 ExtendedFileSystem cachingFileSystem = new AlluxioCachingFileSystem(fileSystem, factoryUri, validationEnabled);
                 cachingFileSystem.initialize(factoryUri, factoryConfig);
                 return cachingFileSystem;
+            case CARROT:
+              cachingFileSystem = new CarrotCachingFileSystem(fileSystem, factoryUri, validationEnabled);
+              cachingFileSystem.initialize(factoryUri, factoryConfig);
+              return cachingFileSystem;
             default:
                 throw new IllegalArgumentException("Invalid CacheType: " + cacheType.name());
         }
