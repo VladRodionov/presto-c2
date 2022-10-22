@@ -14,6 +14,7 @@
 
     <properties>
         <air.main.basedir>${project.parent.basedir}</air.main.basedir>
+        <air.check.skip-duplicate-finder>true</air.check.skip-duplicate-finder>   
     </properties>
 
     <dependencies>

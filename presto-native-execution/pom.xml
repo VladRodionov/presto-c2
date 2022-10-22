@@ -17,6 +17,7 @@
     <properties>
         <air.main.basedir>${project.parent.basedir}</air.main.basedir>
         <air.checkstyle.config-file>src/checkstyle/presto-checks.xml</air.checkstyle.config-file>
+        <air.check.skip-duplicate-finder>true</air.check.skip-duplicate-finder>
     </properties>
 
     <dependencies>
