@@ -248,10 +248,13 @@ public final class SystemSessionProperties
     public static final String QUICK_DISTINCT_LIMIT_ENABLED = "quick_distinct_limit_enabled";
     public static final String OPTIMIZE_CONDITIONAL_AGGREGATION_ENABLED = "optimize_conditional_aggregation_enabled";
     public static final String ANALYZER_TYPE = "analyzer_type";
+    public static final String REMOVE_REDUNDANT_DISTINCT_AGGREGATION_ENABLED = "remove_redundant_distinct_aggregation_enabled";
 
     // TODO: Native execution related session properties that are temporarily put here. They will be relocated in the future.
     public static final String NATIVE_SIMPLIFIED_EXPRESSION_EVALUATION_ENABLED = "simplified_expression_evaluation_enabled";
     public static final String NATIVE_AGGREGATION_SPILL_MEMORY_THRESHOLD = "aggregation_spill_memory_threshold";
+    public static final String NATIVE_JOIN_SPILL_MEMORY_THRESHOLD = "join_spill_memory_threshold";
+    public static final String NATIVE_ORDER_BY_SPILL_MEMORY_THRESHOLD = "order_by_spill_memory_threshold";
     public static final String NATIVE_EXECUTION_ENABLED = "native_execution_enabled";
     public static final String NATIVE_EXECUTION_EXECUTABLE_PATH = "native_execution_executable_path";
 
@@ -1378,6 +1381,16 @@ public final class SystemSessionProperties
                         "Native Execution only. The max memory that a final aggregation can use before spilling. If it is 0, then there is no limit",
                         0,
                         false),
+                integerProperty(
+                        NATIVE_JOIN_SPILL_MEMORY_THRESHOLD,
+                        "Native Execution only. The max memory that hash join can use before spilling. If it is 0, then there is no limit",
+                        0,
+                        false),
+                integerProperty(
+                        NATIVE_ORDER_BY_SPILL_MEMORY_THRESHOLD,
+                        "Native Execution only. The max memory that order by can use before spilling. If it is 0, then there is no limit",
+                        0,
+                        false),
                 booleanProperty(
                         NATIVE_EXECUTION_ENABLED,
                         "Enable execution on native engine",
@@ -1397,6 +1410,11 @@ public final class SystemSessionProperties
                         OPTIMIZE_CONDITIONAL_AGGREGATION_ENABLED,
                         "Enable rewriting IF(condition, AGG(x)) to AGG(x) with condition included in mask",
                         featuresConfig.isOptimizeConditionalAggregationEnabled(),
+                        false),
+                booleanProperty(
+                        REMOVE_REDUNDANT_DISTINCT_AGGREGATION_ENABLED,
+                        "Enable removing distinct aggregation node if input is already distinct",
+                        featuresConfig.isRemoveRedundantDistinctAggregationEnabled(),
                         false));
     }
 
@@ -2346,5 +2364,10 @@ public final class SystemSessionProperties
     public static boolean isOptimizeConditionalAggregationEnabled(Session session)
     {
         return session.getSystemProperty(OPTIMIZE_CONDITIONAL_AGGREGATION_ENABLED, Boolean.class);
+    }
+
+    public static boolean isRemoveRedundantDistinctAggregationEnabled(Session session)
+    {
+        return session.getSystemProperty(REMOVE_REDUNDANT_DISTINCT_AGGREGATION_ENABLED, Boolean.class);
     }
 }
