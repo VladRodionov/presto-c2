@@ -55,7 +55,7 @@ public class CacheFactory
                 cachingFileSystem.initialize(factoryUri, factoryConfig);
                 return cachingFileSystem;
             case CARROT:
-              cachingFileSystem = new CarrotCachingFileSystem(fileSystem, factoryUri, validationEnabled);
+              cachingFileSystem = CarrotCachingFileSystem.get(fileSystem, factoryUri, validationEnabled);
               cachingFileSystem.initialize(factoryUri, factoryConfig);
               return cachingFileSystem;
             default:

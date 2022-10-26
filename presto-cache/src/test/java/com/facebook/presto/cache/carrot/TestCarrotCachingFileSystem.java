@@ -40,6 +40,7 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
+import com.carrot.cache.util.Utils;
 import com.facebook.airlift.log.Logger;
 import com.facebook.presto.cache.CacheConfig;
 import com.facebook.presto.hive.CacheQuota;
@@ -70,20 +71,30 @@ public class TestCarrotCachingFileSystem {
   
   ExtendedFileSystem fs;
   
+  boolean skipTests = false;
+  
   @BeforeClass
   public void setupClass() throws IOException {
+    if (Utils.getJavaVersion() < 11) {
+      skipTests = true;
+      LOG.warn("Java 11+ is required to run test");
+      return;
+    }
     this.sourceFile = TestUtils.createTempFile();
     TestUtils.fillRandom(sourceFile, fileSize.toBytes());
   }
   
   @AfterClass
   public void tearDown() {
+    if (skipTests) return;
     sourceFile.delete();
     LOG.info("Deleted %s", sourceFile.getAbsolutePath());
   }
   
   @BeforeMethod
   public void setUp() throws IOException {
+    if (skipTests) return;
+
     this.cacheDirectory = createTempDirectory("carrot_cache").toUri();
     try {
       this.fs = cachingFileSystem();
@@ -98,8 +109,9 @@ public class TestCarrotCachingFileSystem {
   
   @AfterMethod 
   public void close() throws IOException {
-    CarrotCachingFileSystem cfs = (CarrotCachingFileSystem) fs;
-    cfs.getCache().dispose();
+    if (skipTests) return;
+
+    CarrotCachingFileSystem.dispose();
     checkState(cacheDirectory != null);
     TestUtils.deletePathRecursively(cacheDirectory.getPath());
     LOG.info("Deleted %s", cacheDirectory);
@@ -107,6 +119,8 @@ public class TestCarrotCachingFileSystem {
   
   @Test
   public void testFileSystem() throws Exception {
+    if (skipTests) return;
+
     byte[] buffer = new byte[1000];
     int read = readFully(1000, buffer, 0, buffer.length);
     assertTrue(buffer.length == read);
@@ -153,7 +167,7 @@ public class TestCarrotCachingFileSystem {
     ExtendedFileSystem testingFileSystem = new TestingFileSystem(configuration);
     URI uri = new URI("carrot://test:8020/");
     // 
-    CarrotCachingFileSystem cachingFileSystem = new CarrotCachingFileSystem(testingFileSystem, uri, true);
+    CarrotCachingFileSystem cachingFileSystem = CarrotCachingFileSystem.get(testingFileSystem, uri, true);
     cachingFileSystem.initialize(uri, configuration);
     return cachingFileSystem;
   }
@@ -172,6 +186,11 @@ public class TestCarrotCachingFileSystem {
     @Override
     public URI getUri() {
       return null;
+    }
+
+    @Override
+    public String getScheme() {
+      return "testfs";
     }
 
     @Override

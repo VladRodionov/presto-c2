@@ -21,7 +21,6 @@ import static org.testng.Assert.assertTrue;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.RandomAccessFile;
 import java.lang.management.ManagementFactory;
 import java.net.URI;
 import java.nio.ByteBuffer;
@@ -75,9 +74,17 @@ public class TestCarrotCachingInputStream {
   int ioBufferSize;
   
   String domainName;
+  
+  boolean skipTest = false;
     
   @BeforeClass
   public void setupClass() throws IOException {
+    int javaVersion = Utils.getJavaVersion();
+    if (javaVersion < 11) {
+      skipTest = true;
+      LOG.warn("Skipping " + getClass().getName() + " java version 11 and above is required");
+      return;
+    }
     this.sourceFile = TestUtils.createTempFile();
     if (fillFile) {
       TestUtils.fillRandom(sourceFile, fileSize.toBytes());
@@ -86,7 +93,9 @@ public class TestCarrotCachingInputStream {
   
   @AfterClass
   public void tearDown() {
-
+      if (skipTest) {
+        return;
+      }
       sourceFile.delete();
       LOG.info("Deleted %s", sourceFile.getAbsolutePath());
   }
@@ -95,6 +104,7 @@ public class TestCarrotCachingInputStream {
   public void setup()
           throws IOException
   {
+    if (skipTest) return;
     LOG.info("%s BeforeMethod", Thread.currentThread().getName());  
     this.cacheDirectory = createTempDirectory("carrot_cache").toUri();
       Epoch.reset();
@@ -102,6 +112,7 @@ public class TestCarrotCachingInputStream {
   
   @AfterMethod
   public void close() throws IOException {
+    if (skipTest) return;
     unregisterJMXMetricsSink(cache);
     cache.dispose();
     checkState(cacheDirectory != null);
@@ -157,6 +168,8 @@ public class TestCarrotCachingInputStream {
   
   @Test
   public void testCarrotCachingInputStreamACDisabled () throws IOException {
+    if (skipTest) return;
+
     System.out.printf("Java version=%d\n", Utils.getJavaVersion());
     this.cache = createCache(false);
     runTestRandomAccess();
@@ -164,12 +177,16 @@ public class TestCarrotCachingInputStream {
   
   @Test
   public void testCarrotCachingInputStreamACEnabledSeq () throws IOException {
+    if (skipTest) return;
+
     this.cache = createCache(true);
     runTestRandomSequentialAccess();
   }
   
   @Test
   public void testCarrotCachingInputStreamACEnabled () throws IOException {
+    if (skipTest) return;
+
     System.out.printf("Java version=%d\n", Utils.getJavaVersion());
     this.cache = createCache(true);
     Runnable r = () -> {
@@ -195,24 +212,32 @@ public class TestCarrotCachingInputStream {
 
   @Test
   public void testCarrotCachingInputStreamACDisabledSeq () throws IOException {
+    if (skipTest) return;
+
     this.cache = createCache(false);
     runTestRandomSequentialAccess();
   }
   
   @Test
   public void testCarrotCachingInputStreamNotPositionalReads() throws IOException {
+    if (skipTest) return;
+
     this.cache = createCache(false);
     runTestSequentialAccess();
   }
   
   @Test
   public void testCarrotCachingInputStreamHeapByteBuffer() throws IOException {
+    if (skipTest) return;
+
     this.cache = createCache(false);
     runTestSequentialAccessByteBuffer(false);
   }
   
   @Test
   public void testCarrotCachingInputStreamDirectByteBuffer() throws IOException {
+    if (skipTest) return;
+
     this.cache = createCache(false);
     runTestSequentialAccessByteBuffer(true);
   }

@@ -77,7 +77,7 @@ public class CarrotCachingConfigurationProvider
           Double.toString(carrotCacheConfig.getCacheScavengerStopUsageRatio()));
         
         configuration.set(CarrotConfig.START_INDEX_NUMBER_OF_SLOTS_POWER_KEY, 
-          Integer.toString(carrotCacheConfig.getStartIndexOfSlotsPower()));
+          Integer.toString(carrotCacheConfig.getStartIndexSlotsPower()));
         configuration.set(CarrotConfig.CACHE_MINIMUM_ACTIVE_DATA_SET_RATIO_KEY, 
           Double.toString(carrotCacheConfig.getMinActiveDatasetRatio()));
         //FIXME - this works only for single cache

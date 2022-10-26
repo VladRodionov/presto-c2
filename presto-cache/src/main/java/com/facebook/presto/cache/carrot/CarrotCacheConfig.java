@@ -26,7 +26,7 @@ public class CarrotCacheConfig
   
     public static String CACHE_NAME = "data-cache";
     
-    private boolean metricsCollectionEnabled = false;
+    private boolean metricsCollectionEnabled = true;
     private String metricsDomain = "com.facebook.carrot";
     private DataSize maxCacheSize = new DataSize(500, GIGABYTE);
     private DataSize dataSegmentSize = new DataSize(128, Unit.MEGABYTE);
@@ -274,7 +274,7 @@ public class CarrotCacheConfig
         return this;
     }
     
-    public int getStartIndexOfSlotsPower() {
+    public int getStartIndexSlotsPower() {
       return this.startIndexNumberSlotsPower;
     }
     

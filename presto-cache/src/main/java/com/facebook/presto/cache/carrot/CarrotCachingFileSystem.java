@@ -18,6 +18,9 @@ import java.io.IOException;
 import java.net.URI;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+import javax.annotation.concurrent.ThreadSafe;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -25,39 +28,79 @@ import org.apache.hadoop.fs.Path;
 
 import com.carrot.cache.Cache;
 import com.carrot.cache.util.CarrotConfig;
+import com.carrot.cache.util.Utils;
+import com.facebook.airlift.log.Logger;
 import com.facebook.presto.cache.CachingFileSystem;
 import com.facebook.presto.hive.HiveFileContext;
 import com.facebook.presto.hive.filesystem.ExtendedFileSystem;
 import com.google.common.annotations.VisibleForTesting;
 
+@ThreadSafe
 public class CarrotCachingFileSystem
         extends CachingFileSystem
 {
+    private static Logger LOG = Logger.get(CarrotCachingFileSystem.class);
+    
+    private static Cache cache; // singleton
+    
+    //TODO: does not allow to change configuration dynamically
+    private static ConcurrentHashMap<String, CarrotCachingFileSystem> cachedFS =
+        new ConcurrentHashMap<>();
+    
     private final boolean cacheValidationEnabled;
-    private Cache cache;
-    private int dataPageSize;
-    private int ioBufferSize;
-    private int ioPoolSize;
+    volatile private int dataPageSize;
+    volatile private int ioBufferSize;
+    volatile private int ioPoolSize;
+    volatile private boolean inited = false;
+    
+    public static CarrotCachingFileSystem get(ExtendedFileSystem dataTier, 
+        URI uri, boolean cacheValidationEnabled) throws IOException {
+      checkJavaVersion();
+      CarrotCachingFileSystem fs = cachedFS.get(dataTier.getScheme());
+      if (fs == null) {
+        synchronized(CarrotCachingFileSystem.class) {
+          if (cachedFS.contains(dataTier.getScheme())) {
+            return cachedFS.get(dataTier.getScheme());
+          }
+          fs = new CarrotCachingFileSystem(dataTier, uri, cacheValidationEnabled);
+          cachedFS.put(dataTier.getScheme(), fs);
+        }
+      }
+      return fs;
+    }
+    
+    private static void checkJavaVersion() throws IOException{
+      if (Utils.getJavaVersion() < 11) {
+        throw new IOException("Java 11+ is required to run CARROT cache.");
+      }
+    }
 
-    public CarrotCachingFileSystem(ExtendedFileSystem dataTier, URI uri)
+    private CarrotCachingFileSystem(ExtendedFileSystem dataTier, URI uri)
     {
         this(dataTier, uri, false);
     }
 
-    public CarrotCachingFileSystem(ExtendedFileSystem dataTier, URI uri, boolean cacheValidationEnabled)
+    private CarrotCachingFileSystem(ExtendedFileSystem dataTier, URI uri, boolean cacheValidationEnabled)
     {
         super(dataTier, uri);
-        this.cacheValidationEnabled = cacheValidationEnabled;
+        this.cacheValidationEnabled = cacheValidationEnabled;   
+        LOG.info("CarrotCachingFileSystem ctor");
     }
 
     @Override
-    public synchronized void initialize(URI uri, Configuration configuration)
+    public void initialize(URI uri, Configuration configuration)
             throws IOException
     { 
       
-      CarrotConfig config = CarrotConfig.getInstance(); 
+      if (inited) {
+        LOG.info("CarrotCachingFileSystem.init() DONE uri=%s", uri.toString());
+        return;
+      }
+      LOG.info("CarrotCachingFileSystem.init() uri=%s", uri.toString());
+
+      CarrotConfig config = CarrotConfig.getInstance();
       Iterator<Map.Entry<String, String>> it = configuration.iterator();
-      while(it.hasNext()) {
+      while (it.hasNext()) {
         Map.Entry<String, String> entry = it.next();
         String name = entry.getKey();
         if (CarrotConfig.isCarrotPropertyName(name)) {
@@ -68,21 +111,36 @@ public class CarrotCachingFileSystem
       this.ioBufferSize = (int) configuration.getLong("cache.carrot.io-buffer-size", 256 * 1024);
       this.ioPoolSize = (int) configuration.getLong("cache.carrot.io-pool-size", 32);
       
-      CarrotCachingInputStream.initIOPools(this.ioPoolSize);
-      
-      this.cache = new Cache(CarrotCacheConfig.CACHE_NAME, config);
-      boolean metricsEnabled = configuration.getBoolean("cache.carrot.metrics-enabled", false);
-      if (metricsEnabled) {
-        String domainName = config.getJMXMetricsDomainName();
-        this.cache.registerJMXMetricsSink(domainName);
+      if (cache != null) {
+        LOG.info("CarrotCachingFileSystem.init() cache not NULL");
+        return;
       }
+      
+      synchronized (getClass()) {
+        if (cache != null) {
+          return;
+        }
+        CarrotCachingInputStream.initIOPools(this.ioPoolSize);
+        cache = new Cache(CarrotCacheConfig.CACHE_NAME, config);
+        boolean metricsEnabled = configuration.getBoolean("cache.carrot.metrics-enabled", true);
+        LOG.info("CarrotCachingFileSystem.init() metricsEnabled=%s",
+          Boolean.toString(metricsEnabled));
+
+        if (metricsEnabled) {
+          String domainName = config.getJMXMetricsDomainName();
+          cache.registerJMXMetricsSink(domainName);
+
+        }
+      }
+      this.inited = true;
     }
 
     @Override
     public FSDataInputStream openFile(Path path, HiveFileContext hiveFileContext) throws Exception {
       
       FSDataInputStream extStream = dataTier.openFile(path, hiveFileContext);
-          
+      LOG.info("FileSystem.openFile uri=%s", uri.toString());
+    
       if (hiveFileContext.isCacheable() && hiveFileContext.getFileSize().isPresent()) {
 
         long fileLength = hiveFileContext.getFileSize().getAsLong();
@@ -93,13 +151,16 @@ public class CarrotCachingFileSystem
           return new CarrotCacheValidatingInputStream(cachingInputStream,
               dataTier.openFile(path, hiveFileContext));
         }
+        LOG.info("CarrotCachingFileSystem.openFile uri=%s", uri.toString());
+
         return cachingInputStream;
       }
       return extStream;
     }
     
     @VisibleForTesting
-    Cache getCache() {
-      return this.cache;
+    static void dispose() {
+      cache.dispose();
+      cachedFS.clear();
     }
 }
