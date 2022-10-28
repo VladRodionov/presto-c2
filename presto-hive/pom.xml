@@ -210,15 +210,15 @@
             <artifactId>aws-java-sdk-s3</artifactId>
         </dependency>
 
-        <dependency>
+        <!--dependency>
             <groupId>com.google.cloud.bigdataoss</groupId>
             <artifactId>util</artifactId>
-        </dependency>
+        </dependency-->
 
-        <dependency>
+        <!--dependency>
             <groupId>com.google.cloud.bigdataoss</groupId>
             <artifactId>gcsio</artifactId>
-        </dependency>
+        </dependency-->
 
         <dependency>
             <groupId>com.google.cloud.bigdataoss</groupId>

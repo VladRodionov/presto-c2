@@ -42,6 +42,7 @@ public class CarrotCachingConfigurationProvider
     public void updateConfiguration(Configuration configuration, HdfsContext context, URI uri) {
       if (cacheConfig.isCachingEnabled() && cacheConfig.getCacheType() == CARROT) {
         if (cacheConfig.getBaseDirectory() != null) {
+          // All cache instances in the application must have the same base directory 
           configuration.set(CarrotConfig.CACHE_ROOT_DIR_PATH_KEY,
             cacheConfig.getBaseDirectory().getPath());
         }

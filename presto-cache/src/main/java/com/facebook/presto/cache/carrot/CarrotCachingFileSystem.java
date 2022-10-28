@@ -40,7 +40,6 @@ public class CarrotCachingFileSystem
         extends CachingFileSystem
 {
     private static Logger LOG = Logger.get(CarrotCachingFileSystem.class);
-    
     private static Cache cache; // singleton
     
     //TODO: does not allow to change configuration dynamically
@@ -84,7 +83,6 @@ public class CarrotCachingFileSystem
     {
         super(dataTier, uri);
         this.cacheValidationEnabled = cacheValidationEnabled;   
-        LOG.info("CarrotCachingFileSystem ctor");
     }
 
     @Override
@@ -93,10 +91,8 @@ public class CarrotCachingFileSystem
     { 
       
       if (inited) {
-        LOG.info("CarrotCachingFileSystem.init() DONE uri=%s", uri.toString());
         return;
       }
-      LOG.info("CarrotCachingFileSystem.init() uri=%s", uri.toString());
 
       CarrotConfig config = CarrotConfig.getInstance();
       Iterator<Map.Entry<String, String>> it = configuration.iterator();
@@ -112,7 +108,6 @@ public class CarrotCachingFileSystem
       this.ioPoolSize = (int) configuration.getLong("cache.carrot.io-pool-size", 32);
       
       if (cache != null) {
-        LOG.info("CarrotCachingFileSystem.init() cache not NULL");
         return;
       }
       
@@ -121,10 +116,33 @@ public class CarrotCachingFileSystem
           return;
         }
         CarrotCachingInputStream.initIOPools(this.ioPoolSize);
-        cache = new Cache(CarrotCacheConfig.CACHE_NAME, config);
+        try {
+          cache = Cache.loadCache(CarrotCacheConfig.CACHE_NAME);
+          LOG.info("Loaded cache[%s] from the path: %s\n", cache.getName(), 
+              config.getGlobalCacheRootDir(cache.getName()));
+        } catch (IOException e) {
+          LOG.warn(e.getMessage());
+        }
+        
+        if (cache == null) {
+          // Create new instance
+          cache = new Cache(CarrotCacheConfig.CACHE_NAME, config);
+          LOG.info("Created new cache[%s]\n", cache.getName());
+        }
+        
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+          try {
+            long start = System.currentTimeMillis();
+            LOG.info("Shutting down cache[%s]", CarrotCacheConfig.CACHE_NAME);
+            cache.shutdown();
+            long end = System.currentTimeMillis();
+            LOG.info("Shutting down cache[%s] done in %dms", CarrotCacheConfig.CACHE_NAME, (end - start));
+          } catch (IOException e) {
+            LOG.error(e);
+          }
+        }));
+        
         boolean metricsEnabled = configuration.getBoolean("cache.carrot.metrics-enabled", true);
-        LOG.info("CarrotCachingFileSystem.init() metricsEnabled=%s",
-          Boolean.toString(metricsEnabled));
 
         if (metricsEnabled) {
           String domainName = config.getJMXMetricsDomainName();
@@ -139,7 +157,6 @@ public class CarrotCachingFileSystem
     public FSDataInputStream openFile(Path path, HiveFileContext hiveFileContext) throws Exception {
       
       FSDataInputStream extStream = dataTier.openFile(path, hiveFileContext);
-      LOG.info("FileSystem.openFile uri=%s", uri.toString());
     
       if (hiveFileContext.isCacheable() && hiveFileContext.getFileSize().isPresent()) {
 
@@ -151,7 +168,6 @@ public class CarrotCachingFileSystem
           return new CarrotCacheValidatingInputStream(cachingInputStream,
               dataTier.openFile(path, hiveFileContext));
         }
-        LOG.info("CarrotCachingFileSystem.openFile uri=%s", uri.toString());
 
         return cachingInputStream;
       }
