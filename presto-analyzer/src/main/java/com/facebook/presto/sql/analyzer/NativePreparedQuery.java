@@ -11,34 +11,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.facebook.presto.common.resourceGroups;
+package com.facebook.presto.sql.analyzer;
 
-import com.facebook.drift.annotations.ThriftEnum;
-import com.facebook.drift.annotations.ThriftEnumValue;
+import java.util.Optional;
 
-@ThriftEnum
-public enum QueryType
+public class NativePreparedQuery
+        extends PreparedQuery
 {
-    DATA_DEFINITION(1),
-    DELETE(2),
-    DESCRIBE(3),
-    EXPLAIN(4),
-    ANALYZE(5),
-    INSERT(6),
-    SELECT(7),
-    CONTROL(8),
-    /**/;
-
-    private final int value;
-
-    private QueryType(int value)
+    // TODO: Dummy implementation. This should be replaced with native implementation.
+    public NativePreparedQuery(Optional<String> formattedQuery, Optional<String> prepareSql)
     {
-        this.value = value;
-    }
-
-    @ThriftEnumValue
-    public int getValue()
-    {
-        return value;
+        super(formattedQuery, prepareSql);
     }
 }

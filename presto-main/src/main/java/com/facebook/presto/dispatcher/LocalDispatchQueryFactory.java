@@ -27,8 +27,8 @@ import com.facebook.presto.security.AccessControl;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.resourceGroups.ResourceGroupId;
-import com.facebook.presto.sql.analyzer.QueryPreparer.PreparedQuery;
-import com.facebook.presto.sql.tree.Statement;
+import com.facebook.presto.sql.analyzer.BuiltInQueryPreparer;
+import com.facebook.presto.sql.analyzer.PreparedQuery;
 import com.facebook.presto.tracing.NoopTracerProvider;
 import com.facebook.presto.tracing.QueryStateTracingListener;
 import com.facebook.presto.transaction.TransactionManager;
@@ -42,7 +42,7 @@ import java.util.Optional;
 import java.util.function.Consumer;
 
 import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
-import static com.facebook.presto.sql.analyzer.utils.StatementUtils.isTransactionControlStatement;
+import static com.google.common.base.Preconditions.checkState;
 import static java.util.Objects.requireNonNull;
 
 public class LocalDispatchQueryFactory
@@ -57,7 +57,7 @@ public class LocalDispatchQueryFactory
 
     private final ClusterSizeMonitor clusterSizeMonitor;
 
-    private final Map<Class<? extends Statement>, QueryExecutionFactory<?>> executionFactories;
+    private final Map<QueryType, QueryExecutionFactory<?>> executionFactories;
     private final ListeningExecutorService executor;
 
     private final QueryPrerequisitesManager queryPrerequisitesManager;
@@ -70,7 +70,7 @@ public class LocalDispatchQueryFactory
             Metadata metadata,
             QueryMonitor queryMonitor,
             LocationFactory locationFactory,
-            Map<Class<? extends Statement>, QueryExecutionFactory<?>> executionFactories,
+            Map<QueryType, QueryExecutionFactory<?>> executionFactories,
             ClusterSizeMonitor clusterSizeMonitor,
             DispatchExecutor dispatchExecutor,
             QueryPrerequisitesManager queryPrerequisitesManager)
@@ -108,7 +108,7 @@ public class LocalDispatchQueryFactory
                 locationFactory.createQueryLocation(session.getQueryId()),
                 resourceGroup,
                 queryType,
-                isTransactionControlStatement(preparedQuery.getStatement()),
+                preparedQuery.isTransactionControlStatement(),
                 transactionManager,
                 accessControl,
                 executor,
@@ -119,12 +119,14 @@ public class LocalDispatchQueryFactory
         queryMonitor.queryCreatedEvent(stateMachine.getBasicQueryInfo(Optional.empty()));
 
         ListenableFuture<QueryExecution> queryExecutionFuture = executor.submit(() -> {
-            QueryExecutionFactory<?> queryExecutionFactory = executionFactories.get(preparedQuery.getStatement().getClass());
+            QueryExecutionFactory<?> queryExecutionFactory = executionFactories.get(queryType.get());
             if (queryExecutionFactory == null) {
-                throw new PrestoException(NOT_SUPPORTED, "Unsupported statement type: " + preparedQuery.getStatement().getClass().getSimpleName());
+                throw new PrestoException(NOT_SUPPORTED, "Unsupported statement type: " + preparedQuery.getStatementClass().getSimpleName());
             }
 
-            return queryExecutionFactory.createQueryExecution(preparedQuery, stateMachine, slug, retryCount, warningCollector, queryType);
+            //TODO: PreparedQuery should be passed all the way to analyzer
+            checkState(preparedQuery instanceof BuiltInQueryPreparer.BuiltInPreparedQuery, "Unsupported prepared query type: %s", preparedQuery.getClass().getSimpleName());
+            return queryExecutionFactory.createQueryExecution((BuiltInQueryPreparer.BuiltInPreparedQuery) preparedQuery, stateMachine, slug, retryCount, warningCollector, queryType);
         });
 
         return new LocalDispatchQuery(
