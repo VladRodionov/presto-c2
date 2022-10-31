@@ -11,34 +11,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.facebook.presto.common.resourceGroups;
+package com.facebook.presto.sql.analyzer;
 
-import com.facebook.drift.annotations.ThriftEnum;
-import com.facebook.drift.annotations.ThriftEnumValue;
-
-@ThriftEnum
-public enum QueryType
+/**
+ * Presto supports various analyzers to support various analyzer functionality.
+ */
+public enum AnalyzerType
 {
-    DATA_DEFINITION(1),
-    DELETE(2),
-    DESCRIBE(3),
-    EXPLAIN(4),
-    ANALYZE(5),
-    INSERT(6),
-    SELECT(7),
-    CONTROL(8),
-    /**/;
-
-    private final int value;
-
-    private QueryType(int value)
-    {
-        this.value = value;
-    }
-
-    @ThriftEnumValue
-    public int getValue()
-    {
-        return value;
-    }
+    /**
+     * This is for builtin analyzer. This provides default antlr based parser and inbuilt analyzer to produce Analysis object.
+     */
+    BUILTIN,
+    /**
+     * This is for C++ based parser and analyzer. This analyzer is currently under development.
+     * Please avoid using it, as it may corrupt the session.
+     */
+    NATIVE
 }
