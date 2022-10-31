@@ -55,6 +55,7 @@ public class CarrotCachingFileSystem
     public static CarrotCachingFileSystem get(ExtendedFileSystem dataTier, 
         URI uri, boolean cacheValidationEnabled) throws IOException {
       checkJavaVersion();
+      
       CarrotCachingFileSystem fs = cachedFS.get(dataTier.getScheme());
       if (fs == null) {
         synchronized(CarrotCachingFileSystem.class) {
@@ -90,6 +91,7 @@ public class CarrotCachingFileSystem
             throws IOException
     { 
       
+      try {
       if (inited) {
         return;
       }
@@ -110,22 +112,28 @@ public class CarrotCachingFileSystem
       if (cache != null) {
         return;
       }
-      
+
       synchronized (getClass()) {
+
         if (cache != null) {
           return;
         }
+
         CarrotCachingInputStream.initIOPools(this.ioPoolSize);
         try {
+          
           cache = Cache.loadCache(CarrotCacheConfig.CACHE_NAME);
-          LOG.info("Loaded cache[%s] from the path: %s\n", cache.getName(), 
+          if (cache != null) {
+            LOG.info("Loaded cache[%s] from the path: %s\n", cache.getName(), 
               config.getGlobalCacheRootDir(cache.getName()));
+          }
         } catch (IOException e) {
-          LOG.warn(e.getMessage());
+          LOG.error(e.getMessage());
         }
         
         if (cache == null) {
           // Create new instance
+          LOG.info("Creating new cache");
           cache = new Cache(CarrotCacheConfig.CACHE_NAME, config);
           LOG.info("Created new cache[%s]\n", cache.getName());
         }
@@ -141,6 +149,8 @@ public class CarrotCachingFileSystem
             LOG.error(e);
           }
         }));
+        LOG.info("Shutdown hook installed for cache[%s]\n", cache.getName());
+
         
         boolean metricsEnabled = configuration.getBoolean("cache.carrot.metrics-enabled", true);
 
@@ -150,7 +160,13 @@ public class CarrotCachingFileSystem
 
         }
       }
+      LOG.info("Initialized cache[%s]\n", cache.getName());
+
       this.inited = true;
+      } catch (Throwable e) {
+        LOG.error(e);
+        throw new IOException(e);
+      }
     }
 
     @Override

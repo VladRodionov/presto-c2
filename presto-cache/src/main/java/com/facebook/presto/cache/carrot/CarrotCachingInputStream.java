@@ -20,7 +20,6 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
-import java.util.concurrent.ConcurrentLinkedQueue;
 
 import javax.annotation.concurrent.NotThreadSafe;
 
@@ -31,6 +30,7 @@ import org.apache.hadoop.fs.PositionedReadable;
 import org.apache.hadoop.fs.Seekable;
 
 import com.carrot.cache.Cache;
+import com.carrot.cache.io.ByteBufferPool;
 import com.carrot.cache.util.Utils;
 import com.facebook.airlift.log.Logger;
 import com.google.common.base.Preconditions;
@@ -449,32 +449,4 @@ public class CarrotCachingInputStream extends InputStream
     return this.baseKey;
   }
   
-  private static class ByteBufferPool {
-    
-    private ConcurrentLinkedQueue<byte[]> pool 
-      = new ConcurrentLinkedQueue<byte[]>();
-    
-    private int maxSize;
-    
-    ByteBufferPool(int size){
-      this.maxSize = size;
-    }
-    
-    boolean offer(byte[] buffer) {
-      if (pool.size() >= this.maxSize) {
-        return false;
-      } else {
-        pool.offer(buffer);
-      }
-      return true;
-    }
-    
-    byte[] poll() {
-      return this.pool.poll();
-    }
-    
-    int getMaxSize() {
-      return maxSize;
-    }
-  }
 }
