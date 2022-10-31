@@ -82,6 +82,7 @@ import com.facebook.presto.metadata.StaticFunctionNamespaceStore;
 import com.facebook.presto.metadata.StaticFunctionNamespaceStoreConfig;
 import com.facebook.presto.metadata.TablePropertyManager;
 import com.facebook.presto.metadata.ViewDefinition;
+import com.facebook.presto.operator.CarrotFragmentResultCacheManager;
 import com.facebook.presto.operator.FileFragmentResultCacheConfig;
 import com.facebook.presto.operator.FileFragmentResultCacheManager;
 import com.facebook.presto.operator.FragmentCacheStats;
@@ -513,14 +514,24 @@ public class PrestoSparkModule
     @Singleton
     public static FragmentResultCacheManager createFragmentResultCacheManager(FileFragmentResultCacheConfig config, BlockEncodingSerde blockEncodingSerde, FragmentCacheStats fragmentCacheStats)
     {
-        if (config.isCachingEnabled()) {
-            return new FileFragmentResultCacheManager(
-                    config,
-                    blockEncodingSerde,
-                    fragmentCacheStats,
-                    newFixedThreadPool(5, daemonThreadsNamed("fragment-result-cache-writer-%s")),
-                    newFixedThreadPool(1, daemonThreadsNamed("fragment-result-cache-remover-%s")));
+      if (config.isCachingEnabled()) {
+        if (config.getCacheTypeName().equals(CarrotFragmentResultCacheManager.CACHE_TYPE_NAME)) {
+          CarrotFragmentResultCacheManager cache = new CarrotFragmentResultCacheManager(
+            config,
+            blockEncodingSerde, 
+            fragmentCacheStats,
+            newFixedThreadPool(5, daemonThreadsNamed("fragment-result-cache-writer-%s")));
+          cache.registerShutDownHook();
+          return cache;
+        } else {
+          return new FileFragmentResultCacheManager(
+                  config,
+                  blockEncodingSerde,
+                  fragmentCacheStats,
+                  newFixedThreadPool(5, daemonThreadsNamed("fragment-result-cache-writer-%s")),
+                  newFixedThreadPool(1, daemonThreadsNamed("fragment-result-cache-remover-%s")));
         }
-        return new NoOpFragmentResultCacheManager();
+      }
+      return new NoOpFragmentResultCacheManager();
     }
 }

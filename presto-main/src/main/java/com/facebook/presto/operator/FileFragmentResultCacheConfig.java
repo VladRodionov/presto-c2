@@ -39,7 +39,11 @@ public class FileFragmentResultCacheConfig
     private DataSize maxInFlightSize = new DataSize(1, GIGABYTE);
     private DataSize maxSinglePagesSize = new DataSize(500, MEGABYTE);
     private DataSize maxCacheSize = new DataSize(100, GIGABYTE);
-
+    private String cacheTypeName = "FILE";// Possible: FILE and CARROT
+    private String carrotJmxDomainName = "com.facebook.carrot";
+    private boolean carrotJmxEnabled = true;
+    private boolean carrotAdmissionControllerEnabled = true;
+    
     public boolean isCachingEnabled()
     {
         return cachingEnabled;
@@ -53,6 +57,58 @@ public class FileFragmentResultCacheConfig
         return this;
     }
 
+    public boolean isCarrotJmxEnabled()
+    {
+        return carrotJmxEnabled;
+    }
+
+    @Config("carrot.fragment-result-cache.jmx-enabled")
+    @ConfigDescription("Enable jmx for Carrot")
+    public FileFragmentResultCacheConfig setCarrotJmxEnabled(boolean jmxEnabled)
+    {
+        this.carrotJmxEnabled = jmxEnabled;
+        return this;
+    }
+    
+    public boolean isCarrotAdmissionControllerEnabled()
+    {
+        return carrotAdmissionControllerEnabled;
+    }
+
+    @Config("carrot.fragment-result-cache.admission-enabled")
+    @ConfigDescription("Enable admission controller for Carrot")
+    public FileFragmentResultCacheConfig setCarrotAdmissionControllerEnabled(boolean acEnabled)
+    {
+        this.carrotAdmissionControllerEnabled = acEnabled;
+        return this;
+    }
+    
+    public String getCacheTypeName()
+    {
+        return cacheTypeName;
+    }
+
+    @Config("fragment-result-cache.type-name")
+    @ConfigDescription("Cache type name (FILE or CARROT)")
+    public FileFragmentResultCacheConfig setCacheTypeName(String name)
+    {
+        this.cacheTypeName = name;
+        return this;
+    }
+
+    public String getJmxDomainName()
+    {
+        return carrotJmxDomainName;
+    }
+
+    @Config("carrot.fragment-result-cache.jmx-domain-name")
+    @ConfigDescription("Cache type name (FILE or CARROT)")
+    public FileFragmentResultCacheConfig setJmxDomainName(String name)
+    {
+        this.carrotJmxDomainName = name;
+        return this;
+    }
+    
     public URI getBaseDirectory()
     {
         return baseDirectory;
@@ -65,7 +121,7 @@ public class FileFragmentResultCacheConfig
         this.baseDirectory = baseDirectory;
         return this;
     }
-
+    
     public boolean isBlockEncodingCompressionEnabled()
     {
         return blockEncodingCompressionEnabled;
