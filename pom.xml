@@ -2190,6 +2190,7 @@
                                     <exclude>org.codehaus.plexus:plexus-utils</exclude>
                                     <exclude>com.google.guava:guava</exclude>
                                     <exclude>com.fasterxml.jackson.core:jackson-annotations</exclude>
+                                    <exclude>org.apache.logging.log4j:log4j-core</exclude>
                                 </excludes>
                             </requireUpperBoundDeps>
                         </rules>

@@ -474,6 +474,10 @@
             <artifactId>ratis-common</artifactId>
             <optional>true</optional>
         </dependency>
+	<dependency>
+           <groupId>org.bigbase</groupId>
+           <artifactId>carrot-cache</artifactId>
+       	</dependency>
     </dependencies>
 
     <build>

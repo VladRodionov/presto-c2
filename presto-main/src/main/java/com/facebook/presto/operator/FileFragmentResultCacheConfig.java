@@ -102,7 +102,7 @@ public class FileFragmentResultCacheConfig
     }
 
     @Config("carrot.fragment-result-cache.jmx-domain-name")
-    @ConfigDescription("Cache type name (FILE or CARROT)")
+    @ConfigDescription("Jmx domain name for carrot cache")
     public FileFragmentResultCacheConfig setJmxDomainName(String name)
     {
         this.carrotJmxDomainName = name;
