@@ -51,14 +51,18 @@ Both SSD caches (data and fragment results cache) have been replaced by **C2** a
 
 **C2** has been more than a year under intensive development and testing. It passes 12 hours stress tests in RAM, DISK, and Hybrid modes routinely. Current version is 0.4, 0.5 coming very soon.
 
-## Prerequisits
+## Prerequisites
 
-You need to build **C2** binaries first in [Carrot Cache (C2)](https://github.com/VladRodionov/carrot-cache). Pull or fork the project
-and run from the project root directory:
+- Clone the repository ```carrot-cache-demo```
+ ```
+ git clone https://github.com/VladRodionov/carrot-cache-demo.git
+ ```
+- Install ```carrot-cache``` artifact locally (its in /dist directory)
 
-```./mvn clean install -DskipTests```
-
-This will install locally the needed **carrot-cache** artifact. You can use both Java 8 and Java 11 to build **C2**, but **only java 11+ to run it**. Java 8 has some serious bugs in the File nio package, which, unfortunately breaks the **C2** code during run-time. 
+```
+mvn install:install-file -Dfile=<path-to-file> -DgroupId=org.bigbase -DartifactId=carrot-cache -Dversion=0.5.0-SNAPSHOT
+```
+Note: **C2** does not support Java 8. It has some serious bugs in the File nio package, which, unfortunately breaks the **C2** code during run-time. You can compile your project  with Java 8, but to run **C2** Java 11+ is required.
 
 ## Requirements to build Presto with Velociraptor are the same as for Presto itself
 
@@ -68,11 +72,16 @@ This will install locally the needed **carrot-cache** artifact. You can use both
 
 ## Building Presto + Velociraptor
 
-1. Build **C2** first locally (read above)
-2. Pull **presto-c2** project
+1. Install **C2** first locally (read above)
+2. Clone **presto-c2** project
+```
+git clone https://github.com/VladRodionov/presto-c2.git
+```
 3. Run the following command from the project root directory:
 
-    ./mvnw clean install -DskipTests
+```
+./mvnw clean install -DskipTests
+```
 
 ## Velociraptor configuration
 
