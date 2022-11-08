@@ -34,6 +34,7 @@ import javax.inject.Inject;
 
 import org.weakref.jmx.Managed;
 
+import com.carrot.cache.Builder;
 import com.carrot.cache.Cache;
 import com.carrot.cache.controllers.AQBasedAdmissionController;
 import com.carrot.cache.controllers.MinAliveRecyclingSelector;
@@ -152,7 +153,7 @@ public class CarrotFragmentResultCacheManager
       }
       if (cache == null) {
         // Build new one
-        Cache.Builder builder = new Cache.Builder(CACHE_NAME);
+        Builder builder = new Builder(CACHE_NAME);
         
         builder
           .withCacheDataSegmentSize(segmentSize.toBytes())

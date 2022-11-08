@@ -30,7 +30,7 @@ import org.apache.hadoop.fs.PositionedReadable;
 import org.apache.hadoop.fs.Seekable;
 
 import com.carrot.cache.Cache;
-import com.carrot.cache.io.ByteBufferPool;
+import com.carrot.cache.io.ObjectPool;
 import com.carrot.cache.util.Utils;
 import com.facebook.airlift.log.Logger;
 import com.google.common.base.Preconditions;
@@ -81,17 +81,17 @@ public class CarrotCachingInputStream extends InputStream
   private boolean EOF = false;
   
   /* Pool which keeps I/O buffers to read from cache directly */
-  private static ByteBufferPool ioPool = new ByteBufferPool(32);
+  private static ObjectPool<byte[]> ioPool = new ObjectPool<byte[]>(32);
   
   /* Pool which keeps page buffers to read from external source */
-  private static ByteBufferPool pagePool = new ByteBufferPool(32);
+  private static ObjectPool<byte[]> pagePool = new ObjectPool<byte[]>(32);
   
   static synchronized void initIOPools(int size) {
     if (ioPool == null || ioPool.getMaxSize() != size) {
-      ioPool = new ByteBufferPool(size);
+      ioPool = new ObjectPool<byte[]>(size);
     }
     if (pagePool == null || pagePool.getMaxSize() != size) {
-      pagePool = new ByteBufferPool(size);
+      pagePool = new ObjectPool<byte[]>(size);
     }
   }
   
