@@ -53,8 +53,10 @@ import org.apache.hadoop.mapred.Reporter;
 import org.apache.hadoop.util.Progressable;
 import org.testng.annotations.Test;
 
+import java.io.File;
 import java.io.IOException;
 import java.net.URI;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -252,6 +254,53 @@ public class TestBackgroundHiveSplitLoader
     }
 
     @Test
+    public void testCachingDirectoryListerCarrotMemory()
+            throws Exception
+    {
+        testCachingDirectoryListerCarrot("MEMORY");
+      
+    }
+
+    @Test
+    public void testCachingDirectoryListerCarrotDisk()
+            throws Exception
+    {
+        testCachingDirectoryListerCarrot("DISK");
+      
+    }
+    private void testCachingDirectoryListerCarrot(String cacheType) throws Exception {
+
+      HiveClientConfig config = new HiveClientConfig();
+      // Data directory
+      File dir = Files.createTempDirectory(null).toFile();
+      dir.deleteOnExit();
+      String rootDir = dir.getAbsolutePath();
+
+      config.setFileStatusCacheProviderTypeName("CARROT");
+      config.setFileStatusCacheExpireAfterWrite(new Duration(5, TimeUnit.MINUTES));
+      config.setFileStatusCacheMaxSize(1024 * 1024); // 1MB
+      config.setCarrotCacheRootDir(rootDir);
+      config.setCarrotCacheTypeName(cacheType);
+      config.setCarrotJMXMetricsEnabled(false);
+      
+      config.setFileStatusCacheTables("test_dbname.test_table");
+      testCachingDirectoryLister(new CachingDirectoryLister(new HadoopDirectoryLister(), config),
+        "test_dbname.test_table");
+      config.setFileStatusCacheTables("*");
+      testCachingDirectoryLister(new CachingDirectoryLister(new HadoopDirectoryLister(), config),
+        "*");
+      config.setFileStatusCacheTables("*");
+      testCachingDirectoryLister(new CachingDirectoryLister(new HadoopDirectoryLister(), config),
+        "");
+      config.setFileStatusCacheTables("*,test_dbname.test_table");
+      assertThrows(IllegalArgumentException.class,
+        () -> testCachingDirectoryLister(
+          new CachingDirectoryLister(new HadoopDirectoryLister(), config),
+          "*,test_dbname.test_table"));
+    }
+
+    
+    @Test
     public void testSplittableNotCheckedOnSmallFiles()
             throws Exception
     {
@@ -355,7 +404,7 @@ public class TestBackgroundHiveSplitLoader
     {
         assertEquals(cachingDirectoryLister.getRequestCount(), 0);
 
-        int totalCount = 50;
+        int totalCount = 2;
         CountDownLatch firstVisit = new CountDownLatch(1);
         List<Future<List<HiveSplit>>> futures = new ArrayList<>();
 
@@ -400,6 +449,7 @@ public class TestBackgroundHiveSplitLoader
             assertEquals(cachingDirectoryLister.getHitCount(), totalCount - 1);
             assertEquals(cachingDirectoryLister.getMissCount(), 1);
         }
+        cachingDirectoryLister.getCacheProvider().dispose();
     }
 
     private static List<String> drain(HiveSplitSource source)

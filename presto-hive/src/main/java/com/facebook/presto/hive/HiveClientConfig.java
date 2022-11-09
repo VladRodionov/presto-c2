@@ -225,7 +225,17 @@ public class HiveClientConfig
     private boolean copyOnFirstWriteConfigurationEnabled = true;
 
     private boolean partitionFilteringFromMetastoreEnabled = true;
+    
+    private String fileStatusCacheProviderTypeName = "GUAVA"; // possible values: 'GUAVA', 'CARROT'
+    
+    private String carrotCacheTypeName = "MEMORY"; // 'MEMORY', 'DISK'
 
+    private String carrotCacheRootDir; // null
+    
+    private boolean carrotJMXMetricsEnabled = false;
+    
+    private String carrotJMXDomainName = "com.facebook.carrot";
+    
     @Min(0)
     public int getMaxInitialSplits()
     {
@@ -1058,6 +1068,56 @@ public class HiveClientConfig
         return this;
     }
 
+    public String getFileStatusCacheProviderTypeName() {
+      return this.fileStatusCacheProviderTypeName;
+    }
+    
+    @Config("hive.file-status-cache-provider-type")
+    public HiveClientConfig setFileStatusCacheProviderTypeName(String name) {
+      this.fileStatusCacheProviderTypeName = name;
+      return this;
+    }
+    
+    public String getCarrotCacheTypeName () {
+      return this.carrotCacheTypeName;
+    }
+    
+    @Config("hive.carrot.file-status-cache-type")
+    public HiveClientConfig setCarrotCacheTypeName(String type) {
+      this.carrotCacheTypeName = type;
+      return this;
+    }
+    
+    public String getCarrotCacheRootDir() {
+      return this.carrotCacheRootDir;
+    }
+    
+    @Config("hive.carrot.file-status-cache-root-dir")
+    public HiveClientConfig setCarrotCacheRootDir(String dir) {
+      this.carrotCacheRootDir = dir;
+      return this;
+    }
+    
+    public boolean isCarrotJMXMetricsEnabled() {
+      return carrotJMXMetricsEnabled;
+    }
+    
+    @Config("hive.carrot.jmx-metrics-enabled")
+    public HiveClientConfig setCarrotJMXMetricsEnabled(boolean b) {
+      this.carrotJMXMetricsEnabled = b;
+      return this;
+    }
+    
+    public String getCarrotJMXDomainName() {
+      return this.carrotJMXDomainName;
+    }
+    
+    @Config("hive.carrot.jmx-domain-name")
+    public HiveClientConfig setCarrotJMXDomainName(String domainName) {
+      this.carrotJMXDomainName = domainName;
+      return this;
+    }
+    
     public Duration getFileStatusCacheExpireAfterWrite()
     {
         return fileStatusCacheExpireAfterWrite;

@@ -13,36 +13,75 @@
  */
 package com.facebook.presto.hive;
 
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static java.util.Objects.requireNonNull;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+
+import javax.inject.Inject;
+
+import org.apache.hadoop.fs.Path;
+import org.weakref.jmx.Managed;
+
+import com.carrot.cache.Builder;
+import com.carrot.cache.ObjectCache;
+import com.carrot.cache.controllers.AQBasedAdmissionController;
+import com.carrot.cache.controllers.LRCRecyclingSelector;
+import com.carrot.cache.index.CompactBaseWithExpireIndexFormat;
+import com.carrot.cache.io.BaseDataWriter;
+import com.carrot.cache.io.BaseFileDataReader;
+import com.carrot.cache.io.BaseMemoryDataReader;
+import com.facebook.airlift.log.Logger;
 import com.facebook.presto.hive.filesystem.ExtendedFileSystem;
 import com.facebook.presto.hive.metastore.Partition;
 import com.facebook.presto.hive.metastore.Table;
 import com.facebook.presto.spi.SchemaTableName;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.Weigher;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+
 import io.airlift.units.Duration;
-import org.apache.hadoop.fs.Path;
-import org.weakref.jmx.Managed;
-
-import javax.inject.Inject;
-
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
-
-import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.collect.ImmutableSet.toImmutableSet;
-import static java.util.Objects.requireNonNull;
 
 public class CachingDirectoryLister
         implements DirectoryLister
 {
-    private final Cache<Path, List<HiveFileInfo>> cache;
+    
+    private static Logger log = Logger.get(CachingDirectoryLister.class);
+    public static interface CacheProvider {
+      
+      public List<HiveFileInfo> get(Path p);
+      
+      public void put(Path p, List<HiveFileInfo> infos);
+
+      public void flushCache();
+      
+      public Double getHitRate();
+
+      public Double getMissRate();
+
+      public long getHitCount();
+
+      public long getMissCount();
+
+      public long getRequestCount();
+      
+      public void dispose();
+      
+    }    
+    
+    private final CacheProvider provider;
+    
     private final CachedTableChecker cachedTableChecker;
 
     protected final DirectoryLister delegate;
@@ -50,25 +89,28 @@ public class CachingDirectoryLister
     @Inject
     public CachingDirectoryLister(@ForCachingDirectoryLister DirectoryLister delegate, HiveClientConfig hiveClientConfig)
     {
-        this(
-                delegate,
-                hiveClientConfig.getFileStatusCacheExpireAfterWrite(),
-                hiveClientConfig.getFileStatusCacheMaxSize(),
-                hiveClientConfig.getFileStatusCacheTables());
+        
+      List<String> tables = hiveClientConfig.getFileStatusCacheTables();
+      this.delegate = requireNonNull(delegate, "delegate is null");
+      this.provider = requireNonNull(getCacheProvider(hiveClientConfig), "Cache provider is null");
+      this.cachedTableChecker = new CachedTableChecker(requireNonNull(tables, "tables is null"));
     }
 
-    public CachingDirectoryLister(DirectoryLister delegate, Duration expireAfterWrite, long maxSize, List<String> tables)
+    @VisibleForTesting
+    public CachingDirectoryLister(DirectoryLister delegate, Duration expireAfterWrite, 
+        long maxSize, List<String> tables)
     {
         this.delegate = requireNonNull(delegate, "delegate is null");
-        cache = CacheBuilder.newBuilder()
+        Cache<Path, List<HiveFileInfo>> cache = CacheBuilder.newBuilder()
                 .maximumWeight(maxSize)
                 .weigher((Weigher<Path, List<HiveFileInfo>>) (key, value) -> value.size())
                 .expireAfterWrite(expireAfterWrite.toMillis(), TimeUnit.MILLISECONDS)
                 .recordStats()
                 .build();
+        this.provider = new GuavaCacheProvider(cache);
         this.cachedTableChecker = new CachedTableChecker(requireNonNull(tables, "tables is null"));
     }
-
+    
     @Override
     public Iterator<HiveFileInfo> list(
             ExtendedFileSystem fileSystem,
@@ -78,15 +120,19 @@ public class CachingDirectoryLister
             NamenodeStats namenodeStats,
             HiveDirectoryContext hiveDirectoryContext)
     {
-        List<HiveFileInfo> files = cache.getIfPresent(path);
+        /*DEBUG*/ log.error("LIST %s %s", table, path);
+
+        List<HiveFileInfo> files = provider.get(path);
         if (files != null) {
             return files.iterator();
         }
-
         Iterator<HiveFileInfo> iterator = delegate.list(fileSystem, table, path, partition, namenodeStats, hiveDirectoryContext);
         if (hiveDirectoryContext.isCacheable() && cachedTableChecker.isCachedTable(table.getSchemaTableName())) {
-            return cachingIterator(iterator, path);
+          /*DEBUG*/ log.error("CACHING ITERATOR %s %s", table, path);  
+          return cachingIterator(iterator, path);
         }
+        /*DEBUG*/ log.error("ITERATOR %s %s cacheable=%s cachedTable=%s", table, path,
+          hiveDirectoryContext.isCacheable(), cachedTableChecker.isCachedTable(table.getSchemaTableName()));
         return iterator;
     }
 
@@ -101,7 +147,7 @@ public class CachingDirectoryLister
             {
                 boolean hasNext = iterator.hasNext();
                 if (!hasNext) {
-                    cache.put(path, ImmutableList.copyOf(files));
+                    provider.put(path, ImmutableList.copyOf(files));
                 }
                 return hasNext;
             }
@@ -115,41 +161,45 @@ public class CachingDirectoryLister
             }
         };
     }
-
+    
+    public CacheProvider getCacheProvider() {
+      return this.provider;
+    }
+    
     @Managed
     public void flushCache()
     {
-        cache.invalidateAll();
+        provider.flushCache();
     }
 
     @Managed
     public Double getHitRate()
     {
-        return cache.stats().hitRate();
+        return provider.getHitRate();
     }
 
     @Managed
     public Double getMissRate()
     {
-        return cache.stats().missRate();
+        return provider.getMissRate();
     }
 
     @Managed
     public long getHitCount()
     {
-        return cache.stats().hitCount();
+        return provider.getHitCount();
     }
 
     @Managed
     public long getMissCount()
     {
-        return cache.stats().missCount();
+        return provider.getMissCount();
     }
 
     @Managed
     public long getRequestCount()
     {
-        return cache.stats().requestCount();
+        return provider.getRequestCount();
     }
 
     private static class CachedTableChecker
@@ -176,4 +226,216 @@ public class CachingDirectoryLister
             return cacheAllTables || cachedTableNames.contains(schemaTableName);
         }
     }
+    
+    private CacheProvider getCacheProvider(HiveClientConfig config) {
+      String typeName = config.getFileStatusCacheProviderTypeName();
+      if (typeName.equals(GuavaCacheProvider.TYPE_NAME)) {
+        return new GuavaCacheProvider(config);
+      } else if (typeName.equals(CarrotCacheProvider.TYPE_NAME)) {
+        return CarrotCacheProvider.get(config);
+      }
+      return null;
+    }
+    
+    static class GuavaCacheProvider implements CachingDirectoryLister.CacheProvider {
+      
+      static final String TYPE_NAME = "GUAVA";
+      
+      private Cache<Path, List<HiveFileInfo>> cache;
+      
+      GuavaCacheProvider (Cache<Path, List<HiveFileInfo>> cache){
+        this.cache = cache;
+      }
+      
+      GuavaCacheProvider (HiveClientConfig hiveClientConfig){
+        Duration expireAfterWrite = hiveClientConfig.getFileStatusCacheExpireAfterWrite();
+        long maxSize = hiveClientConfig.getFileStatusCacheMaxSize();
+        cache = CacheBuilder.newBuilder()
+            .maximumWeight(maxSize)
+            .weigher((Weigher<Path, List<HiveFileInfo>>) (key, value) -> value.size())
+            .expireAfterWrite(expireAfterWrite.toMillis(), TimeUnit.MILLISECONDS)
+            .recordStats()
+            .build();
+      }
+      
+      @Override
+      public List<HiveFileInfo> get(Path p) {
+        return cache.getIfPresent(p);
+      }
+
+      @Override
+      public void put(Path p, List<HiveFileInfo> infos) {
+        cache.put(p, infos);
+      }
+
+      @Override
+      public void flushCache() {
+        cache.invalidateAll();
+      }
+
+      @Override
+      public Double getHitRate() {
+        return cache.stats().hitRate();
+      }
+
+      @Override
+      public Double getMissRate() {
+        return cache.stats().missRate();
+      }
+
+      @Override
+      public long getHitCount() {
+        return cache.stats().hitCount();
+      }
+
+      @Override
+      public long getMissCount() {
+        return cache.stats().missCount();
+      }
+
+      @Override
+      public long getRequestCount() {
+        return cache.stats().requestCount();
+      }
+
+      @Override
+      public void dispose() {
+        // Do nothing
+      }
+    }
+    @SuppressWarnings("unchecked")
+
+    static class CarrotCacheProvider implements CachingDirectoryLister.CacheProvider {
+      
+      static Logger log = Logger.get(CarrotCacheProvider.class);
+      
+      static final String TYPE_NAME = "CARROT";
+      
+      static final String CACHE_NAME = "file_status";
+      
+      ObjectCache cache;
+      
+      long expire;
+      
+      private CarrotCacheProvider(ObjectCache cache) {
+        this.cache = cache;
+      }
+      
+      void setExpireAfterWrite(long expire) {
+        this.expire = expire;
+      }
+      
+      static CarrotCacheProvider get(HiveClientConfig config) {
+        String rootDir = config.getCarrotCacheRootDir();
+        Objects.requireNonNull(rootDir, "Carrot cache root directory is null");
+        String type = config.getCarrotCacheTypeName();
+        long maxSize = config.getFileStatusCacheMaxSize();
+        long expireAfterWrite = config.getFileStatusCacheExpireAfterWrite().toMillis();
+        
+        ObjectCache cache = null;
+        try {
+          cache = ObjectCache.loadCache(rootDir, CACHE_NAME);
+          
+          if (cache == null) {
+            
+            Builder builder = new Builder(CACHE_NAME);
+            
+            builder = builder
+                .withObjectCacheKeyClass(Path.class)
+                .withObjectCacheValueClass(ArrayList.class)
+                .withCacheMaximumSize(maxSize)
+                .withRecyclingSelector(LRCRecyclingSelector.class.getName())
+                .withDataWriter(BaseDataWriter.class.getName())
+                .withMemoryDataReader(BaseMemoryDataReader.class.getName())
+                .withFileDataReader(BaseFileDataReader.class.getName())
+                .withMainQueueIndexFormat(CompactBaseWithExpireIndexFormat.class.getName());
+            
+            if (type.equals("DISK")) {
+              builder = builder
+                  .withCacheDataSegmentSize(128 * 1024 * 1024)
+                  .withAdmissionController(AQBasedAdmissionController.class.getName());
+              cache = builder.buildObjectDiskCache();
+            } else if (type.equals("MEMORY")){
+              cache = builder.buildObjectMemoryCache();
+            } else {
+              log.error("Unrecognized type %s for Carrot cache", type);
+              return null;
+            }
+          }
+        } catch (IOException e) {
+          log.error(e);
+          return null;
+        }
+  
+        // We do not need this for testing
+        cache.addShutdownHook();
+        if (config.isCarrotJMXMetricsEnabled()) {
+          String domainName = config.getCarrotJMXDomainName();
+          cache.registerJMXMetricsSink(domainName);
+        }
+        CarrotCacheProvider provider = new CarrotCacheProvider(cache);
+        provider.setExpireAfterWrite(expireAfterWrite);
+        return provider;
+      }
+      
+      @Override
+      public List<HiveFileInfo> get(Path p) {
+        try {
+          List<HiveFileInfo> result = (List<HiveFileInfo>) cache.get(p);
+          /*DEBUG*/log.error("GET %s result=%s", p, result);
+          return result;
+        } catch(IOException e) {
+          log.error(e);
+          return null;
+        }
+      }
+
+      @Override
+      public void put(Path p, List<HiveFileInfo> infos) {
+        try {
+          
+          boolean result = cache.put(p, infos, System.currentTimeMillis() + expire);
+          /*DEBUG*/log.error("PUT %s result=%s", p, Boolean.toString(result));
+
+        } catch (IOException e) {
+          log.error(e);
+        }
+      }
+
+      @Override
+      public void flushCache() {
+        //no op
+      }
+
+      @Override
+      public Double getHitRate() {
+        return cache.getHitRate();
+      }
+
+      @Override
+      public Double getMissRate() {
+        return 1.d - getHitRate();
+      }
+
+      @Override
+      public long getHitCount() {
+        return cache.getTotalHits();
+      }
+
+      @Override
+      public long getMissCount() {
+        return cache.getTotalGets() - cache.getTotalHits();
+      }
+
+      @Override
+      public long getRequestCount() {
+        return cache.getTotalGets();
+      }
+
+      @Override
+      public void dispose() {
+        this.cache.getNativeCache().dispose();
+      }
+    }
 }
+
