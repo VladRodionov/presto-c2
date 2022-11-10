@@ -228,13 +228,50 @@ public class HiveClientConfig
     
     private String fileStatusCacheProviderTypeName = "GUAVA"; // possible values: 'GUAVA', 'CARROT'
     
-    private String carrotCacheTypeName = "MEMORY"; // 'MEMORY', 'DISK'
+    private String carrotCacheTypeName = "MEMORY"; // 'MEMORY', 'DISK', 'HYBRID'
 
     private String carrotCacheRootDir; // null
     
     private boolean carrotJMXMetricsEnabled = false;
     
     private String carrotJMXDomainName = "com.facebook.carrot";
+    
+    private boolean carrotAdmissionControllerEnabled = false;
+    /*
+     * Range [0, 1] the less the ratio - the less chances for object to be cached
+     * Only most popular objects will reach the cache. The larger the ratio  increases
+     * chances for object to be cached. This parameter controls disk write rate. The less
+     * the ratio the less data will be written. 
+     */
+    private double carrotAdmissionControllerRatio = 0.5;
+    
+    /**
+     * Data segment size for Carrot cache. For disk cache 64MB+ is recommended.
+     * For memory cache - 4MB+ is OK for majority use cases. The maximum number of segments
+     * in the Carrot  Cache is 64K. The data segment size defines the maximum cache capacity:
+     * 
+     * 4MB - 256GB (4MB * 64K)
+     * 
+     * 64MB - 4TB
+     * 
+     * 256MB - 16TB
+     * 
+     * 2GB - 128TB
+     * 
+     * bear in mind that the larger data segment size the more memory is required for Carrot Cache to operate
+     * 
+     * Carrot Cache in default configuration can maintain up to 8 data segments in the RAM
+     * 
+     * So, for 4MB data segment its up to 32MB of RAM
+     * for 128MB - up to 1GB RAM is required to support C2 operation
+     */
+    private int carrotDataSegmentSize = 4 * 1024 * 1024;
+    
+    /*
+     * Use md5 hash of a key instead of a key . Its 16 bytes vs. possibly very long key 
+     * key is the Path object which can be very long 
+     */
+    private boolean carrotUseHashForKeys = false;
     
     @Min(0)
     public int getMaxInitialSplits()
@@ -1118,6 +1155,45 @@ public class HiveClientConfig
       return this;
     }
     
+    public boolean isCarrotAdmissionControllerEnabled() {
+      return this.carrotAdmissionControllerEnabled;
+    }
+    
+    @Config("hive.carrot.admission-controller-enabled")
+    public HiveClientConfig setCarrotAdmissionControllerEnabled(boolean b) {
+      this.carrotAdmissionControllerEnabled = b;
+      return this;
+    }
+    
+    public boolean isCarrotHashForKeysEnabled() {
+      return this.carrotUseHashForKeys;
+    }
+    
+    @Config("hive.carrot.hash-for-keys-enabled")
+    public HiveClientConfig setCarrotHashForKeysEnabled(boolean b) {
+      this.carrotUseHashForKeys = b;
+      return this;
+    }
+    
+    public double getCarrotAdmissionControllerRatio() {
+      return this.carrotAdmissionControllerRatio;
+    }
+    
+    @Config("hive.carrot.admission-controller-ratio")
+    public HiveClientConfig setCarrotAdmissionControllerRatio(double r) {
+      this.carrotAdmissionControllerRatio = r;
+      return this;
+    }
+    
+    public int getCarrotDataSegmentSize() {
+      return this.carrotDataSegmentSize;
+    }
+    
+    @Config("hive.carrot.data-segment-size")
+    public HiveClientConfig setCarrotDataSegmentSize(int size) {
+      this.carrotDataSegmentSize = size;
+      return this;
+    }
     public Duration getFileStatusCacheExpireAfterWrite()
     {
         return fileStatusCacheExpireAfterWrite;

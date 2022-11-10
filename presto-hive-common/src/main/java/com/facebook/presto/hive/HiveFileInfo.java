@@ -24,15 +24,15 @@ import java.util.Optional;
 import static java.util.Objects.requireNonNull;
 
 public class HiveFileInfo
-        implements Comparable
+        implements Comparable<HiveFileInfo>
 {
-    private final Path path;
-    private final boolean isDirectory;
-    private final BlockLocation[] blockLocations;
-    private final long length;
-    private final long fileModifiedTime;
-    private final Optional<byte[]> extraFileInfo;
-    private final Map<String, String> customSplitInfo;
+    private Path path;
+    private boolean isDirectory;
+    private BlockLocation[] blockLocations;
+    private long length;
+    private long fileModifiedTime;
+    private Optional<byte[]> extraFileInfo;
+    private Map<String, String> customSplitInfo;
 
     public static HiveFileInfo createHiveFileInfo(LocatedFileStatus locatedFileStatus, Optional<byte[]> extraFileContext)
     {
@@ -54,7 +54,7 @@ public class HiveFileInfo
                 customSplitInfo);
     }
 
-    private HiveFileInfo(Path path, boolean isDirectory, BlockLocation[] blockLocations, long length, long fileModifiedTime, Optional<byte[]> extraFileInfo, Map<String, String> customSplitInfo)
+    public HiveFileInfo(Path path, boolean isDirectory, BlockLocation[] blockLocations, long length, long fileModifiedTime, Optional<byte[]> extraFileInfo, Map<String, String> customSplitInfo)
     {
         this.path = requireNonNull(path, "path is null");
         this.isDirectory = isDirectory;
@@ -64,7 +64,7 @@ public class HiveFileInfo
         this.extraFileInfo = requireNonNull(extraFileInfo, "extraFileInfo is null");
         this.customSplitInfo = requireNonNull(customSplitInfo, "customSplitInfo is null");
     }
-
+    
     public Path getPath()
     {
         return path;
@@ -101,9 +101,8 @@ public class HiveFileInfo
     }
 
     @Override
-    public int compareTo(Object o)
+    public int compareTo(HiveFileInfo o)
     {
-        HiveFileInfo other = (HiveFileInfo) o;
-        return this.getPath().compareTo(other.getPath());
+        return this.getPath().compareTo(o.getPath());
     }
 }

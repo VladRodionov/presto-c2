@@ -16,11 +16,15 @@ package com.facebook.presto.hive;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static java.util.Objects.requireNonNull;
+import static com.google.common.hash.Hashing.md5;
+import static java.nio.charset.StandardCharsets.UTF_8;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -28,6 +32,7 @@ import java.util.concurrent.TimeUnit;
 
 import javax.inject.Inject;
 
+import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.Path;
 import org.weakref.jmx.Managed;
 
@@ -39,6 +44,10 @@ import com.carrot.cache.index.CompactBaseWithExpireIndexFormat;
 import com.carrot.cache.io.BaseDataWriter;
 import com.carrot.cache.io.BaseFileDataReader;
 import com.carrot.cache.io.BaseMemoryDataReader;
+import com.esotericsoftware.kryo.kryo5.Kryo;
+import com.esotericsoftware.kryo.kryo5.Serializer;
+import com.esotericsoftware.kryo.kryo5.io.Input;
+import com.esotericsoftware.kryo.kryo5.io.Output;
 import com.facebook.airlift.log.Logger;
 import com.facebook.presto.hive.filesystem.ExtendedFileSystem;
 import com.facebook.presto.hive.metastore.Partition;
@@ -49,6 +58,7 @@ import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.Weigher;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 
 import io.airlift.units.Duration;
@@ -57,7 +67,7 @@ public class CachingDirectoryLister
         implements DirectoryLister
 {
     
-    private static Logger log = Logger.get(CachingDirectoryLister.class);
+    //private static Logger log = Logger.get(CachingDirectoryLister.class);
     public static interface CacheProvider {
       
       public List<HiveFileInfo> get(Path p);
@@ -120,7 +130,6 @@ public class CachingDirectoryLister
             NamenodeStats namenodeStats,
             HiveDirectoryContext hiveDirectoryContext)
     {
-        /*DEBUG*/ log.error("LIST %s %s", table, path);
 
         List<HiveFileInfo> files = provider.get(path);
         if (files != null) {
@@ -128,11 +137,8 @@ public class CachingDirectoryLister
         }
         Iterator<HiveFileInfo> iterator = delegate.list(fileSystem, table, path, partition, namenodeStats, hiveDirectoryContext);
         if (hiveDirectoryContext.isCacheable() && cachedTableChecker.isCachedTable(table.getSchemaTableName())) {
-          /*DEBUG*/ log.error("CACHING ITERATOR %s %s", table, path);  
           return cachingIterator(iterator, path);
         }
-        /*DEBUG*/ log.error("ITERATOR %s %s cacheable=%s cachedTable=%s", table, path,
-          hiveDirectoryContext.isCacheable(), cachedTableChecker.isCachedTable(table.getSchemaTableName()));
         return iterator;
     }
 
@@ -317,6 +323,12 @@ public class CachingDirectoryLister
       
       long expire;
       
+      /**
+       * Use md5 hashes for keys. Its 128 bit long (16 bytes) 
+       * cryptographic hash. 
+       */
+      boolean useMD5hash = false;
+      
       private CarrotCacheProvider(ObjectCache cache) {
         this.cache = cache;
       }
@@ -325,35 +337,45 @@ public class CachingDirectoryLister
         this.expire = expire;
       }
       
+      void setUseMD5hash(boolean b) {
+        this.useMD5hash = b;
+      }
+      
       static CarrotCacheProvider get(HiveClientConfig config) {
         String rootDir = config.getCarrotCacheRootDir();
         Objects.requireNonNull(rootDir, "Carrot cache root directory is null");
         String type = config.getCarrotCacheTypeName();
         long maxSize = config.getFileStatusCacheMaxSize();
         long expireAfterWrite = config.getFileStatusCacheExpireAfterWrite().toMillis();
-        
+        int dataSegmentSize = config.getCarrotDataSegmentSize();
+        boolean useMD5hashForKeys = config.isCarrotHashForKeysEnabled();
         ObjectCache cache = null;
         try {
           cache = ObjectCache.loadCache(rootDir, CACHE_NAME);
-          
           if (cache == null) {
-            
             Builder builder = new Builder(CACHE_NAME);
-            
             builder = builder
-                .withObjectCacheKeyClass(Path.class)
                 .withObjectCacheValueClass(ArrayList.class)
                 .withCacheMaximumSize(maxSize)
+                .withCacheDataSegmentSize(dataSegmentSize)
                 .withRecyclingSelector(LRCRecyclingSelector.class.getName())
                 .withDataWriter(BaseDataWriter.class.getName())
                 .withMemoryDataReader(BaseMemoryDataReader.class.getName())
                 .withFileDataReader(BaseFileDataReader.class.getName())
                 .withMainQueueIndexFormat(CompactBaseWithExpireIndexFormat.class.getName());
-            
+            if (!useMD5hashForKeys) {
+              builder = builder.withObjectCacheKeyClass(Path.class);
+            } else {
+              builder = builder.withObjectCacheKeyClass(byte[].class);
+            }
             if (type.equals("DISK")) {
+              boolean admissionControllerEnabled = config.isCarrotAdmissionControllerEnabled();
+              double ratio = config.getCarrotAdmissionControllerRatio();
+              if (admissionControllerEnabled) {
               builder = builder
-                  .withCacheDataSegmentSize(128 * 1024 * 1024)
-                  .withAdmissionController(AQBasedAdmissionController.class.getName());
+                  .withAdmissionController(AQBasedAdmissionController.class.getName())
+                  .withAdmissionQueueStartSizeRatio(ratio);
+              }
               cache = builder.buildObjectDiskCache();
             } else if (type.equals("MEMORY")){
               cache = builder.buildObjectMemoryCache();
@@ -365,8 +387,10 @@ public class CachingDirectoryLister
         } catch (IOException e) {
           log.error(e);
           return null;
-        }
-  
+        }       
+        cache.addClassAndSerializer(HiveFileInfo.class, new HiveFileInfoSerializer());
+        cache.addClassesForRegistration(BlockLocation.class, java.util.Optional.class);
+        
         // We do not need this for testing
         cache.addShutdownHook();
         if (config.isCarrotJMXMetricsEnabled()) {
@@ -375,33 +399,89 @@ public class CachingDirectoryLister
         }
         CarrotCacheProvider provider = new CarrotCacheProvider(cache);
         provider.setExpireAfterWrite(expireAfterWrite);
+        provider.setUseMD5hash(useMD5hashForKeys);
         return provider;
       }
       
+      static public class HiveFileInfoSerializer extends Serializer<HiveFileInfo> {
+        
+        public HiveFileInfoSerializer () {
+        }
+        
+        @Override
+        public void write (Kryo kryo, Output output, HiveFileInfo obj) {
+          Path path = obj.getPath();
+          boolean isDirectory = obj.isDirectory();
+          BlockLocation[] blockLocations = obj.getBlockLocations();
+          long length = obj.getLength();
+          long fileModifiedTime = obj.getFileModifiedTime();
+          java.util.Optional<byte[]> extraFileInfo = obj.getExtraFileInfo();
+          Map<String, String> customSplitInfo = obj.getCustomSplitInfo();
+          
+          output.writeString(path.toString());
+          output.writeBoolean(isDirectory);
+          kryo.writeObject(output, blockLocations);
+          output.writeLong(length);
+          output.writeLong(fileModifiedTime);
+          kryo.writeObject(output, extraFileInfo);
+          int size = customSplitInfo == null? -1: customSplitInfo.size();
+          output.writeInt(size);
+          if (size >= 0) {
+            for (Map.Entry<String, String> entry: customSplitInfo.entrySet()) {
+              output.writeString(entry.getKey());
+              output.writeString(entry.getValue());
+            }
+          }
+        }
+
+        @Override
+        public HiveFileInfo read(Kryo kryo, Input input, Class<? extends HiveFileInfo> type) {
+          Path p = new Path(input.readString());
+          boolean isDirectory = input.readBoolean();
+          BlockLocation[] blockLocations = kryo.readObject(input, BlockLocation[].class);
+          long length = input.readLong();
+          long fileModifiedTime = input.readLong();
+          java.util.Optional<byte[]> extraFileInfo = kryo.readObject(input,  java.util.Optional.class);
+          Map<String, String> map = new HashMap<String, String>();
+          ImmutableMap<String, String> imap = null;
+          int size = input.readInt();
+          if (size >=0) {
+            for (int i = 0; i < size; i++) {
+              String key = input.readString();
+              String value = input.readString();
+              map.put(key, value);
+            }
+            imap = ImmutableMap.copyOf(map);
+          }
+          return new HiveFileInfo(p, isDirectory, blockLocations, length, fileModifiedTime, extraFileInfo, imap);
+        }
+      }
       @Override
       public List<HiveFileInfo> get(Path p) {
         try {
-          List<HiveFileInfo> result = (List<HiveFileInfo>) cache.get(p);
-          /*DEBUG*/log.error("GET %s result=%s", p, result);
+          Object key = getKey(p);
+          List<HiveFileInfo> result = (List<HiveFileInfo>) cache.get(key);
           return result;
-        } catch(IOException e) {
+        } catch(Exception e) {
           log.error(e);
           return null;
         }
       }
-
       @Override
       public void put(Path p, List<HiveFileInfo> infos) {
         try {
-          
-          boolean result = cache.put(p, infos, System.currentTimeMillis() + expire);
-          /*DEBUG*/log.error("PUT %s result=%s", p, Boolean.toString(result));
-
+          Object key = getKey(p);
+          cache.put(key, infos, System.currentTimeMillis() + expire);
         } catch (IOException e) {
           log.error(e);
         }
       }
-
+      
+      @SuppressWarnings("deprecation")
+      private Object getKey(Path p) {
+        return useMD5hash?  md5().hashString(p.toString(), UTF_8).asBytes(): p;
+      }
+      
       @Override
       public void flushCache() {
         //no op

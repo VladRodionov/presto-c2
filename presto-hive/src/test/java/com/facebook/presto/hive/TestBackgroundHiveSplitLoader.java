@@ -282,6 +282,7 @@ public class TestBackgroundHiveSplitLoader
       config.setCarrotCacheRootDir(rootDir);
       config.setCarrotCacheTypeName(cacheType);
       config.setCarrotJMXMetricsEnabled(false);
+      config.setCarrotHashForKeysEnabled(true);
       
       config.setFileStatusCacheTables("test_dbname.test_table");
       testCachingDirectoryLister(new CachingDirectoryLister(new HadoopDirectoryLister(), config),
@@ -404,7 +405,7 @@ public class TestBackgroundHiveSplitLoader
     {
         assertEquals(cachingDirectoryLister.getRequestCount(), 0);
 
-        int totalCount = 2;
+        int totalCount = 50;
         CountDownLatch firstVisit = new CountDownLatch(1);
         List<Future<List<HiveSplit>>> futures = new ArrayList<>();
 
