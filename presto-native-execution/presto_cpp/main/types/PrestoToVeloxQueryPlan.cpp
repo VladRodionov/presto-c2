@@ -67,6 +67,11 @@ RowTypePtr toRowType(
   return ROW(std::move(names), std::move(types));
 }
 
+template <typename T>
+std::string toJsonString(const T& value) {
+  return ((json)value).dump();
+}
+
 connector::hive::HiveColumnHandle::ColumnType toHiveColumnType(
     protocol::ColumnType type) {
   switch (type) {
@@ -77,7 +82,8 @@ connector::hive::HiveColumnHandle::ColumnType toHiveColumnType(
     case protocol::ColumnType::SYNTHESIZED:
       return connector::hive::HiveColumnHandle::ColumnType::kSynthesized;
     default:
-      throw std::invalid_argument("Unknown Hive column type");
+      VELOX_UNSUPPORTED(
+          "Unsupported Hive column type: {}.", toJsonString(type));
   }
 }
 
@@ -97,7 +103,8 @@ std::shared_ptr<connector::ColumnHandle> toColumnHandle(
         tpchColumn->columnName);
   }
 
-  throw std::invalid_argument("Unknown column handle type: " + column->_type);
+  VELOX_UNSUPPORTED(
+      "Unsupported column handle type: {}.", toJsonString(column->_type));
 }
 
 connector::hive::LocationHandle::TableType toTableType(
@@ -110,7 +117,7 @@ connector::hive::LocationHandle::TableType toTableType(
     case protocol::TableType::TEMPORARY:
       return connector::hive::LocationHandle::TableType::kTemporary;
     default:
-      throw std::invalid_argument("Unknown table type");
+      VELOX_UNSUPPORTED("Unsupported table type: {}.", toJsonString(tableType));
   }
 }
 
@@ -127,7 +134,7 @@ connector::hive::LocationHandle::WriteMode toWriteMode(
       return connector::hive::LocationHandle::WriteMode::
           kDirectToTargetExistingDirectory;
     default:
-      throw std::invalid_argument("Unknown write mode");
+      VELOX_UNSUPPORTED("Unsupported write mode: {}.", toJsonString(writeMode));
   }
 }
 
@@ -665,7 +672,8 @@ std::shared_ptr<connector::ConnectorTableHandle> toConnectorTableHandle(
         tpch::fromTableName(tpchLayout->table.tableName),
         tpchLayout->table.scaleFactor);
   }
-  throw std::invalid_argument("Unsupported TableHandle type");
+  VELOX_UNSUPPORTED(
+      "Unsupported TableHandle type: {}.", toJsonString(tableHandle));
 }
 
 std::vector<core::TypedExprPtr> getProjections(
@@ -696,7 +704,7 @@ void setCellFromVariantByKind<TypeKind::VARBINARY>(
     const VectorPtr& /*column*/,
     vector_size_t /*row*/,
     const velox::variant& value) {
-  throw std::invalid_argument("Return of VARBINARY data is not supported");
+  VELOX_UNSUPPORTED("Return of VARBINARY data is not supported.");
 }
 
 template <>
@@ -749,7 +757,7 @@ core::SortOrder toVeloxSortOrder(const protocol::SortOrder& sortOrder) {
     case protocol::SortOrder::DESC_NULLS_LAST:
       return core::SortOrder(false, false);
     default:
-      throw std::invalid_argument("Unknown sort order");
+      VELOX_UNSUPPORTED("Unsupported sort order: {}.", sortOrder);
   }
 }
 
@@ -908,11 +916,6 @@ PartitionedOutputChannels toChannels(
     }
   }
   return output;
-}
-
-template <typename T>
-std::string toJsonString(const T& value) {
-  return ((json)value).dump();
 }
 
 core::LocalPartitionNode::Type toLocalExchangeType(
@@ -1114,17 +1117,11 @@ core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
           node->source)) {
     std::optional<core::JoinType> joinType = std::nullopt;
     if (equal(node->predicate, semiJoin->semiJoinOutput)) {
-      joinType = core::JoinType::kLeftSemi;
+      joinType = core::JoinType::kLeftSemiFilter;
     } else if (auto notCall = isNot(node->predicate)) {
       if (equal(notCall->arguments[0], semiJoin->semiJoinOutput)) {
         joinType = core::JoinType::kNullAwareAnti;
       }
-    }
-
-    if (!joinType.has_value()) {
-      VELOX_UNSUPPORTED(
-          "Unsupported Filter over SemiJoin: {}",
-          toJsonString(node->predicate));
     }
 
     std::vector<core::FieldAccessTypedExprPtr> leftKeys = {
@@ -1139,10 +1136,26 @@ core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
     const auto& leftNames = left->outputType()->names();
     const auto& leftTypes = left->outputType()->children();
 
-    std::vector<std::string> names;
-    names.reserve(leftNames.size() + 1);
-    std::copy(leftNames.begin(), leftNames.end(), std::back_inserter(names));
-    names.emplace_back(semiJoin->semiJoinOutput.name);
+    auto names = leftNames;
+    names.push_back(semiJoin->semiJoinOutput.name);
+
+    if (!joinType.has_value()) {
+      auto types = leftTypes;
+      types.push_back(BOOLEAN());
+
+      return std::make_shared<core::FilterNode>(
+          node->id,
+          exprConverter_.toVeloxExpr(node->predicate),
+          std::make_shared<core::HashJoinNode>(
+              semiJoin->id,
+              core::JoinType::kLeftSemiProject,
+              leftKeys,
+              rightKeys,
+              nullptr, // filter
+              left,
+              right,
+              ROW(std::move(names), std::move(types))));
+    }
 
     std::vector<core::TypedExprPtr> projections;
     projections.reserve(leftNames.size() + 1);
@@ -1150,7 +1163,8 @@ core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
       projections.emplace_back(std::make_shared<core::FieldAccessTypedExpr>(
           leftTypes[i], leftNames[i]));
     }
-    const bool constantValue = joinType.value() == core::JoinType::kLeftSemi;
+    const bool constantValue =
+        joinType.value() == core::JoinType::kLeftSemiFilter;
     projections.emplace_back(
         std::make_shared<core::ConstantTypedExpr>(constantValue));
 
@@ -1717,6 +1731,7 @@ VeloxQueryPlanConverter::toVeloxQueryPlan(
       node->columnNames,
       insertTableHandle,
       outputType,
+      connector::WriteProtocol::CommitStrategy::kNoCommit,
       toVeloxQueryPlan(node->source, tableWriteInfo, taskId));
 }
 
