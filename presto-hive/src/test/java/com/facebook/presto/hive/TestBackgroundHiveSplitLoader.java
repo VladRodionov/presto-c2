@@ -274,7 +274,7 @@ public class TestBackgroundHiveSplitLoader
       // Data directory
       File dir = Files.createTempDirectory(null).toFile();
       dir.deleteOnExit();
-      String rootDir = dir.getAbsolutePath();
+      URI rootDir = new URI("file://" + dir.getAbsolutePath());
 
       config.setFileStatusCacheProviderTypeName("CARROT");
       config.setFileStatusCacheExpireAfterWrite(new Duration(5, TimeUnit.MINUTES));

@@ -53,6 +53,8 @@ import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static java.lang.String.format;
 import static java.util.Locale.ENGLISH;
 
+import java.net.URI;
+
 @DefunctConfig({
         "hive.file-system-cache-ttl",
         "hive.max-global-split-iterator-threads",
@@ -230,7 +232,7 @@ public class HiveClientConfig
     
     private String carrotCacheTypeName = "MEMORY"; // 'MEMORY', 'DISK', 'HYBRID'
 
-    private String carrotCacheRootDir; // null
+    private URI carrotCacheRootDir; // null
     
     private boolean carrotJMXMetricsEnabled = false;
     
@@ -1125,12 +1127,12 @@ public class HiveClientConfig
       return this;
     }
     
-    public String getCarrotCacheRootDir() {
+    public URI getCarrotCacheRootDir() {
       return this.carrotCacheRootDir;
     }
     
     @Config("hive.carrot.file-status-cache-root-dir")
-    public HiveClientConfig setCarrotCacheRootDir(String dir) {
+    public HiveClientConfig setCarrotCacheRootDir(URI dir) {
       this.carrotCacheRootDir = dir;
       return this;
     }

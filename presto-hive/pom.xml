@@ -210,15 +210,15 @@
             <artifactId>aws-java-sdk-s3</artifactId>
         </dependency>
 
-        <dependency>
+        <!--dependency>
             <groupId>com.google.cloud.bigdataoss</groupId>
             <artifactId>util</artifactId>
-        </dependency>
+        </dependency-->
 
-        <dependency>
+        <!--dependency>
             <groupId>com.google.cloud.bigdataoss</groupId>
             <artifactId>gcsio</artifactId>
-        </dependency>
+        </dependency-->
 
         <dependency>
             <groupId>com.google.cloud.bigdataoss</groupId>
@@ -308,10 +308,15 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-annotations</artifactId>
         </dependency>
-     <!--dependency>
+     <dependency>
            <groupId>org.bigbase</groupId>
            <artifactId>carrot-cache</artifactId>
-        </dependency-->
+        </dependency>
+        <dependency>
+		<groupId>com.esotericsoftware.kryo</groupId>
+                <artifactId>kryo5</artifactId>
+                <version>5.3.0</version>        
+	</dependency>
         <!-- for testing -->
         <dependency>
             <groupId>com.facebook.presto</groupId>

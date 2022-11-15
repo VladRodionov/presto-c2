@@ -98,7 +98,6 @@ public class CarrotFragmentResultCacheManager
     {
         requireNonNull(cacheConfig, "cacheConfig is null");
         requireNonNull(blockEncodingSerde, "blockEncodingSerde is null");
-        /*DEBUG*/ log.error("CFRCM ctor");
         this.baseDirectory = Paths.get(cacheConfig.getBaseDirectory());
         this.maxInFlightBytes = cacheConfig.getMaxInFlightSize().toBytes();
         this.maxSinglePagesBytes = cacheConfig.getMaxSinglePagesSize().toBytes();
@@ -117,11 +116,9 @@ public class CarrotFragmentResultCacheManager
           log.error(e);
           return;
         }
-        /*DEBUG*/ log.error("CFRCM ctor cache instance created");
 
         if (jmxEnabled) {
           cache.registerJMXMetricsSink(cacheConfig.getJmxDomainName());
-          log.error("CFRCM ctor cache JMX registered");
         }
     }
     
@@ -196,10 +193,8 @@ public class CarrotFragmentResultCacheManager
     @Override
     public Future<?> put(String serializedPlan, Split split, List<Page> result)
     {
-      log.error("CFRCM PUT");  
       // We support only 
         if (!isCompatibleSplit(split)) {
-          log.error("CFRCM PUT incompatible split");
           return immediateFuture(null);
         }
         
@@ -252,7 +247,6 @@ public class CarrotFragmentResultCacheManager
     @Override
     public Optional<Iterator<Page>> get(String serializedPlan, Split split)
     {
-      log.error("CFRCM GET");  
   
       byte[] rawKey = getRawKey(serializedPlan, split.getSplitIdentifier());
         

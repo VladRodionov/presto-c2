@@ -67,7 +67,6 @@ public class CachingDirectoryLister
         implements DirectoryLister
 {
     
-    //private static Logger log = Logger.get(CachingDirectoryLister.class);
     public static interface CacheProvider {
       
       public List<HiveFileInfo> get(Path p);
@@ -342,8 +341,8 @@ public class CachingDirectoryLister
       }
       
       static CarrotCacheProvider get(HiveClientConfig config) {
-        String rootDir = config.getCarrotCacheRootDir();
-        Objects.requireNonNull(rootDir, "Carrot cache root directory is null");
+        Objects.requireNonNull(config.getCarrotCacheRootDir(), "Carrot cache root directory is null");
+        String rootDir = config.getCarrotCacheRootDir().getPath();
         String type = config.getCarrotCacheTypeName();
         long maxSize = config.getFileStatusCacheMaxSize();
         long expireAfterWrite = config.getFileStatusCacheExpireAfterWrite().toMillis();
@@ -352,6 +351,7 @@ public class CachingDirectoryLister
         ObjectCache cache = null;
         try {
           cache = ObjectCache.loadCache(rootDir, CACHE_NAME);
+          log.error("Loaded cache=%s from=%s name=%s", cache, rootDir, CACHE_NAME);
           if (cache == null) {
             Builder builder = new Builder(CACHE_NAME);
             builder = builder
@@ -394,6 +394,7 @@ public class CachingDirectoryLister
         // We do not need this for testing
         cache.addShutdownHook();
         if (config.isCarrotJMXMetricsEnabled()) {
+          log.info("CarrotCacheProvider JMX enabled");
           String domainName = config.getCarrotJMXDomainName();
           cache.registerJMXMetricsSink(domainName);
         }

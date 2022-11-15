@@ -205,13 +205,12 @@ public class CarrotCachingInputStream extends InputStream
     return dataReadFromBuffer;
   }
 
-  
   private int localCachedRead(byte[] bytesBuffer, int offset, int length, 
                               long position) throws IOException {
     long currentPage = position / pageSize;
    
     int currentPageOffset = (int) (position % pageSize);
-    // This is the assumption which is not always correct
+    // This is the assumption which is not always correct ???
     int bytesLeftInPage = (int) (pageSize - currentPageOffset);
     int bytesToReadInPage = Math.min(bytesLeftInPage, length);
     byte[] key = getKey(currentPage * pageSize);
@@ -223,6 +222,7 @@ public class CarrotCachingInputStream extends InputStream
     }
     // on local cache miss, read a  from external storage. This will always make
     // progress or throw an exception
+    // This is assumption that external buffer size == page size
     int size = readExternalPage(position);
     if (size > 0) {
       cache.put(key, 0, key.length, this.extBuffer, 0, size, 0L /* no expire */);
@@ -239,7 +239,6 @@ public class CarrotCachingInputStream extends InputStream
     Preconditions.checkArgument(length >= 0, "length should be non-negative");
     Preconditions.checkArgument(offset >= 0, "offset should be non-negative");
     Preconditions.checkArgument(position >= 0, "position should be non-negative");
-    /* DEBUG */ LOG.error("%d,XYZ,pos=%d,length=%d\n", Thread.currentThread().getId(), length);
     
     if (length == 0) {
       return 0;
