@@ -35,7 +35,7 @@ Although the initial reaction to the announcement was very favorable, there are 
 1. It provides the single solution for all five caches - **C2**
 2. It makes all five caches much more scalable, because **C2** supports diferent mode of operations: RAM (offheap), SSD and Hybrid (RAM -> SSD)
 3. It is very easy on JVM because it barely uses Java heap memory and produces virtually no object garbage during normal operation. **C2** does not use JVM heap to store data or meta information and therefore it does not affect JVM GC at all.
-4. It is SSD friendly, providing 20-30x times better SSD endurance compared to Alluxio or a home-grown SSD cache. This is because, all writes in **C2** are performed by large blocks, usually 256MB in size, (as opposed to 1MB writes in Alluxio). Writing data to SSD in 256MB blocks decreases DLWA by factor of 3-8x compared to writing data in 1MB blocks (Alluxio). Another very significant feature of **C2** - it utilizes pluggable Cache admission controller, which can significantly reduce data volume written to SSD while keeping hit ratio almost the same. Combination of log-structured storage and smart admission controller significantly reduces SSD wearing and increases its life span.
+4. It is SSD friendly, providing 20-30x times better SSD endurance compared to Alluxio or a home-grown SSD cache. This is because, all writes in **C2** are performed by large blocks, usually 256MB in size, (as opposed to 1MB writes in Alluxio). Writing data to SSD in 256MB blocks decreases DLWA by factor of 3-8x compared to writing data in 1MB blocks (Alluxio). Another very significant feature of **C2** - it utilizes pluggable Cache admission controller, which can significantly reduce data volume written to SSD while keeping hit ratio almost the same. Combination of log-structured storage and smart admission controller significantly reduces SSD wearing and increases its life span. Default admission controller shows significant reduction in write activity while keeping almost the same cache hit ratio.
 5. **C2** provides several eviction algorithms out of box, some of them are scan-resistant, besides this, admission controller acts as the special suppression buffer for long scan operations. Long scans do not trash the cache, because they have no chances to reach the cache.
 6. ALL FIVE CACHES are restartable now, so it is safe to restart Presto server and have all caches up and runnning again.
 7. **C2** number of files in the file system is manageable, usually in low thousands (not millions).
@@ -45,7 +45,7 @@ Although the initial reaction to the announcement was very favorable, there are 
 
 ## Current state of development
 
-Both SSD caches (data and fragment results cache) have been replaced by **C2** and integrated into Presto. Data cache has been tested on a real database (TPCH) and provided good results, fragments results cache is under testing. Metadata, File list and Parquet/ORC caches are work in progress.
+Data, Fragment results and File List caches have been replaced with **C2** and integrated into Presto. Metadata and Parquet/ORC caches are work in progress.
 
 ## How solid Carrot Cache is right now?
 
@@ -62,7 +62,7 @@ Both SSD caches (data and fragment results cache) have been replaced by **C2** a
 ```
 mvn install:install-file -Dfile=<path-to-file> -DgroupId=org.bigbase -DartifactId=carrot-cache -Dversion=0.5.0-SNAPSHOT
 ```
-Note: **C2** does not support Java 8. It has some serious bugs in the File nio package, which, unfortunately breaks the **C2** code during run-time. You can compile your project  with Java 8, but to run **C2** Java 11+ is required.
+Note: **C2** does not support Java 8. Jav 8 has some serious bugs in the File nio package, which, unfortunately breaks the **C2** code during run-time. You can compile your project  with Java 8, but to run **C2** Java 11+ is required.
 
 ## Requirements to build Presto with Velociraptor are the same as for Presto itself
 
@@ -98,8 +98,14 @@ cache.type=CARROT
 cache.carrot.max-cache-size=1500GB
 # To export JMX metrics
 cache.carrot.metrics-enabled=true
+# JMX domann name, default is 'com.facebook.carrot'
+cache.carrot.metrics-domain=some-name
 # Data page is the minimum block of data which C2 caches, default is 1MB
 cache.carrot.data-page-size=512KB
+# I/O buffer size, default - 256kB
+cache.carrot.io-buffer-size=1MB
+# I/O pool size - it keeps I/O buffers for reuse, default - 32
+ache.carrot.io-pool-size=128
 # Data segment size, default is 128MB
 cache.carrot.data-segment-size=256MB
 # Cache eviction policy: SLRU or LRU, default is Segmented LRU
@@ -112,6 +118,7 @@ cache.carrot.admission-controller-enabled=true
 # The real number between 0.0 and 1.0. The less the number - the more restrictive admission is
 # Default value is 0.5
 cache.carrot.admission-queue-size-ratio=0.2
+
 ```
 There are some other configuration parameters, you can check them out in : ```CarrotCacheConfig``` class.
 
@@ -121,20 +128,50 @@ In etc/config.properties:
 
 ```
 fragment-result-cache.enabled=true
-fragment-result-cache.max-cached-entries=1000000
-fragment-result-cache.base-directory=file:///mnt/flash/fragment
+fragment-result-cache.base-directory=file:///mnt/flash/data
 fragment-result-cache.cache-ttl=24h
 fragment-result-cache.max-cache-size=500GB
 hive.partition-statistics-based-optimization-enabled=true
 
 # Carrot specific section
+# Cache type : CARROT or FILE (default)
 fragment-result-cache.type-name=CARROT
 # Enable JMX metrics
 carrot.fragment-result-cache.jmx-enabled=true
+# JMX domann name, default is 'com.facebook.carrot'
+carrot.fragment-result-cache.jmx-domain-name=some-name
 # Is admission controller enabled 
-carrot.fragment-result-cache.admission-enabled=true
+carrot.fragment-result-cache.admission-controller-enabled=true
+# The real number between 0.0 and 1.0. The less the number - the more restrictive admission is
+# Default value is 0.5
+carrot.fragment-result-cache.admission-queue-size-ratio=0.2
+# Cache data segment size, default is 128MB
+carrot.fragment-result-cache.data-segment-size=256MB
+```
+## File list cache
+
+In etc/catalog/hive.properties
 
 ```
+hive.file-status-cache-expire-time=24h
+hive.file-status-cache-size=1500GB
+hive.file-status-cache-tables=*
+# File list cach type : GUAVA (default) or CARROT
+hive.file-status-cache-provider-type=CARROT
+# Type of the Carrot cache: MEMORY or DISK
+hive.carrot.file-status-cache-type=DISK
+hive.carrot.file-status-cache-root-dir=file:///mnt/flash/data
+hive.carrot.jmx-metrics-enabled=true
+hive.carrot.jmx-metrics-domain-name=some-name
+hive.carrot.data-segment-size=64MB
+hive.carrot.admission-controller-enabled=true
+hive.carrot.admission-controller-ratio=0.2
+# Use 16 bytes MD5 hash instead of key (save space for long keys), default - false
+hive.carrot.hash-for-keys-enabled=true
+
+```
+**In the DISK mode File List cache can scale to billions of files. Its purpose is to support very large data sets.**
+
 **Very important:** The base data directory MUST BE THE SAME FOR ALL C2 CACHES in Velociraptor.
 
 ## Installation and deployment
