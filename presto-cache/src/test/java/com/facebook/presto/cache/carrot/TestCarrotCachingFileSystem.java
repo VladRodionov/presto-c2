@@ -32,6 +32,7 @@ import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.util.Progressable;
 import org.testng.annotations.AfterClass;
@@ -41,6 +42,8 @@ import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 import com.carrot.cache.util.Utils;
+import com.esotericsoftware.kryo.kryo5.Kryo;
+import com.esotericsoftware.kryo.kryo5.io.Output;
 import com.facebook.airlift.log.Logger;
 import com.facebook.presto.cache.CacheConfig;
 import com.facebook.presto.hive.CacheQuota;
@@ -117,6 +120,32 @@ public class TestCarrotCachingFileSystem {
     LOG.info("Deleted %s", cacheDirectory);
   }
   
+  @Test
+  public void testFileStatus() throws IOException {
+    FsPermission perm = new FsPermission(FsAction.ALL, FsAction.ALL, FsAction.ALL);
+    String user = "user";
+    String group = "group";
+    if (this.sourceFile == null) {
+      this.sourceFile = TestUtils.createTempFile();
+    }
+    FileStatus fs = new FileStatus(100000000, false, 3, 64000000, System.currentTimeMillis(),
+      System.currentTimeMillis(), perm, user, group,
+      new Path(sourceFile.toURI()));
+    
+    Kryo kryo = new Kryo();
+    kryo.register(FileStatus.class);
+    kryo.register(Path.class);
+    kryo.register(URI.class);
+    kryo.register(FsPermission.class);
+    kryo.register(FsAction.class);
+    Output out = new Output(4096);
+    
+    kryo.writeObject(out, fs);
+    
+    int size = out.position();
+    LOG.info("FileStatus size=%d path len=%d", size, sourceFile.toString().length());
+    
+  }
   @Test
   public void testFileSystem() throws Exception {
     if (skipTests) return;

@@ -13,20 +13,21 @@
  */
 package com.facebook.presto.operator;
 
+import static io.airlift.units.DataSize.Unit.GIGABYTE;
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
+import static java.util.concurrent.TimeUnit.DAYS;
+
+import java.net.URI;
+
+import javax.validation.constraints.Min;
+
 import com.facebook.airlift.configuration.Config;
 import com.facebook.airlift.configuration.ConfigDescription;
+
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.airlift.units.MinDataSize;
 import io.airlift.units.MinDuration;
-
-import javax.validation.constraints.Min;
-
-import java.net.URI;
-
-import static io.airlift.units.DataSize.Unit.GIGABYTE;
-import static io.airlift.units.DataSize.Unit.MEGABYTE;
-import static java.util.concurrent.TimeUnit.DAYS;
 
 public class FileFragmentResultCacheConfig
 {
@@ -39,10 +40,12 @@ public class FileFragmentResultCacheConfig
     private DataSize maxInFlightSize = new DataSize(1, GIGABYTE);
     private DataSize maxSinglePagesSize = new DataSize(500, MEGABYTE);
     private DataSize maxCacheSize = new DataSize(100, GIGABYTE);
+    private DataSize dataSegmentSize = new DataSize(128, MEGABYTE);
     private String cacheTypeName = "FILE";// Possible: FILE and CARROT
     private String carrotJmxDomainName = "com.facebook.carrot";
     private boolean carrotJmxEnabled = true;
     private boolean carrotAdmissionControllerEnabled = true;
+    private double cacheAdmissionQueueSizeRatio = 0.5;
     
     public boolean isCachingEnabled()
     {
@@ -57,6 +60,19 @@ public class FileFragmentResultCacheConfig
         return this;
     }
 
+    public DataSize getDataSegmentSize()
+    {
+        return dataSegmentSize;
+    }
+
+    @Config("carrot.fragment-result-cache.data-segment-size")
+    @ConfigDescription("The data segment size")
+    public FileFragmentResultCacheConfig setDataSegmentSize(DataSize size)
+    {
+        this.dataSegmentSize = size;
+        return this;
+    }
+    
     public boolean isCarrotJmxEnabled()
     {
         return carrotJmxEnabled;
@@ -75,11 +91,23 @@ public class FileFragmentResultCacheConfig
         return carrotAdmissionControllerEnabled;
     }
 
-    @Config("carrot.fragment-result-cache.admission-enabled")
+    @Config("carrot.fragment-result-cache.admission-controller-enabled")
     @ConfigDescription("Enable admission controller for Carrot")
     public FileFragmentResultCacheConfig setCarrotAdmissionControllerEnabled(boolean acEnabled)
     {
         this.carrotAdmissionControllerEnabled = acEnabled;
+        return this;
+    }
+    
+    public double getCacheAdmissionQueueSizeRatio() {
+      return this.cacheAdmissionQueueSizeRatio;
+    }
+    
+    @Config("carrot.fragment-result-cache.admission-queue-size-ratio")
+    @ConfigDescription("Size of the admission queue as a ratio of a maximum cache size")
+    public FileFragmentResultCacheConfig setCacheAdmissionQueueSizeRatio(double v)
+    {
+        this.cacheAdmissionQueueSizeRatio = v;
         return this;
     }
     

@@ -278,7 +278,7 @@ public class TestBackgroundHiveSplitLoader
 
       config.setFileStatusCacheProviderTypeName("CARROT");
       config.setFileStatusCacheExpireAfterWrite(new Duration(5, TimeUnit.MINUTES));
-      config.setFileStatusCacheMaxSize(1024 * 1024); // 1MB
+      config.setFileStatusCacheMaxSize(new DataSize(1, MEGABYTE)); // 1MB
       config.setCarrotCacheRootDir(rootDir);
       config.setCarrotCacheTypeName(cacheType);
       config.setCarrotJMXMetricsEnabled(false);

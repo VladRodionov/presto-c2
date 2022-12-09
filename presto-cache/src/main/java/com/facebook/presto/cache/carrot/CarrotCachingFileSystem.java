@@ -125,7 +125,7 @@ public class CarrotCachingFileSystem
           cache = Cache.loadCache(CarrotCacheConfig.CACHE_NAME);
           if (cache != null) {
             LOG.info("Loaded cache[%s] from the path: %s\n", cache.getName(), 
-              config.getGlobalCacheRootDir(cache.getName()));
+              config.getCacheRootDir(cache.getName()));
           }
         } catch (IOException e) {
           LOG.error(e.getMessage());

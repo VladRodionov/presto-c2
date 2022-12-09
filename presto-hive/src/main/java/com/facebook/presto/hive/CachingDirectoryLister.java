@@ -57,7 +57,6 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
 import com.google.common.cache.Weigher;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 
@@ -146,13 +145,14 @@ public class CachingDirectoryLister
         return new Iterator<HiveFileInfo>()
         {
             private final List<HiveFileInfo> files = new ArrayList<>();
-
+            private boolean putDone = false;
             @Override
             public boolean hasNext()
             {
                 boolean hasNext = iterator.hasNext();
-                if (!hasNext) {
-                    provider.put(path, ImmutableList.copyOf(files));
+                if (!hasNext && !putDone) {
+                    provider.put(path, files);
+                    putDone = true;
                 }
                 return hasNext;
             }
@@ -254,7 +254,7 @@ public class CachingDirectoryLister
       
       GuavaCacheProvider (HiveClientConfig hiveClientConfig){
         Duration expireAfterWrite = hiveClientConfig.getFileStatusCacheExpireAfterWrite();
-        long maxSize = hiveClientConfig.getFileStatusCacheMaxSize();
+        long maxSize = hiveClientConfig.getFileStatusCacheMaxSize().toBytes();
         cache = CacheBuilder.newBuilder()
             .maximumWeight(maxSize)
             .weigher((Weigher<Path, List<HiveFileInfo>>) (key, value) -> value.size())
@@ -344,9 +344,9 @@ public class CachingDirectoryLister
         Objects.requireNonNull(config.getCarrotCacheRootDir(), "Carrot cache root directory is null");
         String rootDir = config.getCarrotCacheRootDir().getPath();
         String type = config.getCarrotCacheTypeName();
-        long maxSize = config.getFileStatusCacheMaxSize();
+        long maxSize = config.getFileStatusCacheMaxSize().toBytes();
         long expireAfterWrite = config.getFileStatusCacheExpireAfterWrite().toMillis();
-        int dataSegmentSize = config.getCarrotDataSegmentSize();
+        int dataSegmentSize = (int) config.getCarrotDataSegmentSize().toBytes();
         boolean useMD5hashForKeys = config.isCarrotHashForKeysEnabled();
         ObjectCache cache = null;
         try {
@@ -355,7 +355,7 @@ public class CachingDirectoryLister
           if (cache == null) {
             Builder builder = new Builder(CACHE_NAME);
             builder = builder
-                .withObjectCacheValueClass(ArrayList.class)
+                
                 .withCacheMaximumSize(maxSize)
                 .withCacheDataSegmentSize(dataSegmentSize)
                 .withRecyclingSelector(LRCRecyclingSelector.class.getName())
@@ -363,11 +363,7 @@ public class CachingDirectoryLister
                 .withMemoryDataReader(BaseMemoryDataReader.class.getName())
                 .withFileDataReader(BaseFileDataReader.class.getName())
                 .withMainQueueIndexFormat(CompactBaseWithExpireIndexFormat.class.getName());
-            if (!useMD5hashForKeys) {
-              builder = builder.withObjectCacheKeyClass(Path.class);
-            } else {
-              builder = builder.withObjectCacheKeyClass(byte[].class);
-            }
+     
             if (type.equals("DISK")) {
               boolean admissionControllerEnabled = config.isCarrotAdmissionControllerEnabled();
               double ratio = config.getCarrotAdmissionControllerRatio();
@@ -387,10 +383,25 @@ public class CachingDirectoryLister
         } catch (IOException e) {
           log.error(e);
           return null;
-        }       
-        cache.addClassAndSerializer(HiveFileInfo.class, new HiveFileInfoSerializer());
-        cache.addClassesForRegistration(BlockLocation.class, java.util.Optional.class);
+        }  
         
+        Class<?> keyClass = null;
+        Class<?> valueClass = ArrayList.class;
+        if (!useMD5hashForKeys) {
+          keyClass = Path.class;
+        } else {
+          keyClass = byte[].class;
+        }
+        
+        cache.addKeyValueClasses(keyClass, valueClass);
+        
+        ObjectCache.SerdeInitializationListener listener = (x) -> {
+        
+          x.register(HiveFileInfo.class, new HiveFileInfoSerializer());
+          x.register(BlockLocation.class);
+          x.register(java.util.Optional.class);
+        };
+        cache.addSerdeInitializationListener(listener);
         // We do not need this for testing
         cache.addShutdownHook();
         if (config.isCarrotJMXMetricsEnabled()) {
@@ -462,6 +473,7 @@ public class CachingDirectoryLister
         try {
           Object key = getKey(p);
           List<HiveFileInfo> result = (List<HiveFileInfo>) cache.get(key);
+          log.error("CACHE GET key=%s result=%s", p.toString(), result);
           return result;
         } catch(Exception e) {
           log.error(e);
@@ -472,7 +484,8 @@ public class CachingDirectoryLister
       public void put(Path p, List<HiveFileInfo> infos) {
         try {
           Object key = getKey(p);
-          cache.put(key, infos, System.currentTimeMillis() + expire);
+          boolean result = cache.put(key, infos, System.currentTimeMillis() + expire);
+          log.error("CACHE PUT key=%s result=%s", p.toString(), Boolean.toString(result));
         } catch (IOException e) {
           log.error(e);
         }

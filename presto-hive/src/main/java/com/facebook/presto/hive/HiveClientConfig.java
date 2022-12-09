@@ -18,6 +18,7 @@ import com.facebook.airlift.configuration.ConfigDescription;
 import com.facebook.airlift.configuration.DefunctConfig;
 import com.facebook.airlift.configuration.LegacyConfig;
 import com.facebook.drift.transport.netty.codec.Protocol;
+import com.facebook.presto.cache.carrot.CarrotCacheConfig;
 import com.facebook.presto.hive.s3.S3FileSystemType;
 import com.facebook.presto.orc.OrcWriteValidation.OrcWriteValidationMode;
 import com.facebook.presto.spi.schedule.NodeSelectionStrategy;
@@ -184,7 +185,7 @@ public class HiveClientConfig
     private boolean zstdJniDecompressionEnabled;
 
     private Duration fileStatusCacheExpireAfterWrite = new Duration(0, TimeUnit.SECONDS);
-    private long fileStatusCacheMaxSize;
+    private DataSize fileStatusCacheMaxSize;
     private List<String> fileStatusCacheTables = ImmutableList.of();
 
     private DataSize pageFileStripeMaxSize = new DataSize(24, MEGABYTE);
@@ -267,13 +268,13 @@ public class HiveClientConfig
      * So, for 4MB data segment its up to 32MB of RAM
      * for 128MB - up to 1GB RAM is required to support C2 operation
      */
-    private int carrotDataSegmentSize = 4 * 1024 * 1024;
-    
+    private DataSize dataSegmentSize = new DataSize(128, MEGABYTE);
     /*
      * Use md5 hash of a key instead of a key . Its 16 bytes vs. possibly very long key 
      * key is the Path object which can be very long 
      */
     private boolean carrotUseHashForKeys = false;
+    
     
     @Min(0)
     public int getMaxInitialSplits()
@@ -1095,13 +1096,13 @@ public class HiveClientConfig
         return this;
     }
 
-    public long getFileStatusCacheMaxSize()
+    public DataSize getFileStatusCacheMaxSize()
     {
         return fileStatusCacheMaxSize;
     }
 
     @Config("hive.file-status-cache-size")
-    public HiveClientConfig setFileStatusCacheMaxSize(long fileStatusCacheMaxSize)
+    public HiveClientConfig setFileStatusCacheMaxSize(DataSize fileStatusCacheMaxSize)
     {
         this.fileStatusCacheMaxSize = fileStatusCacheMaxSize;
         return this;
@@ -1125,6 +1126,19 @@ public class HiveClientConfig
     public HiveClientConfig setCarrotCacheTypeName(String type) {
       this.carrotCacheTypeName = type;
       return this;
+    }
+    
+    public DataSize getCarrotDataSegmentSize()
+    {
+        return dataSegmentSize;
+    }
+
+    @Config("hive.carrot.data-segment-size")
+    @ConfigDescription("The data segment size")
+    public HiveClientConfig setCarrotDataSegmentSize(DataSize size)
+    {
+        this.dataSegmentSize = size;
+        return this;
     }
     
     public URI getCarrotCacheRootDir() {
@@ -1187,15 +1201,6 @@ public class HiveClientConfig
       return this;
     }
     
-    public int getCarrotDataSegmentSize() {
-      return this.carrotDataSegmentSize;
-    }
-    
-    @Config("hive.carrot.data-segment-size")
-    public HiveClientConfig setCarrotDataSegmentSize(int size) {
-      this.carrotDataSegmentSize = size;
-      return this;
-    }
     public Duration getFileStatusCacheExpireAfterWrite()
     {
         return fileStatusCacheExpireAfterWrite;

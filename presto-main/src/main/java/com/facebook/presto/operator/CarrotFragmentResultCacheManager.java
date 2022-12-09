@@ -56,7 +56,6 @@ import io.airlift.slice.InputStreamSliceInput;
 import io.airlift.slice.OutputStreamSliceOutput;
 import io.airlift.slice.SliceOutput;
 import io.airlift.units.DataSize;
-import io.airlift.units.DataSize.Unit;
 
 /**
  * Initially supports only hive-connector
@@ -83,10 +82,12 @@ public class CarrotFragmentResultCacheManager
     private final FragmentCacheStats fragmentCacheStats;
     private final ExecutorService flushExecutor;
     
-    private final DataSize segmentSize = new DataSize(128, Unit.MEGABYTE);
-
+    private final DataSize segmentSize;
+    
     private long cacheTtl;
+    
     private boolean acEnabled;
+    private double cacheAdmissionQueueSizeRatio;
     private Cache cache;
 
     @Inject
@@ -107,7 +108,9 @@ public class CarrotFragmentResultCacheManager
         this.fragmentCacheStats = requireNonNull(fragmentCacheStats, "fragmentCacheStats is null");
         this.flushExecutor = requireNonNull(flushExecutor, "flushExecutor is null");
         this.cacheTtl = cacheConfig.getCacheTtl().toMillis();
-        acEnabled = cacheConfig.isCarrotAdmissionControllerEnabled();
+        this.segmentSize = cacheConfig.getDataSegmentSize();
+        this.acEnabled = cacheConfig.isCarrotAdmissionControllerEnabled();
+        this.cacheAdmissionQueueSizeRatio = cacheConfig.getCacheAdmissionQueueSizeRatio();
         boolean jmxEnabled = cacheConfig.isCarrotJmxEnabled();
         try {
           this.cache = getCache();
@@ -130,13 +133,10 @@ public class CarrotFragmentResultCacheManager
           try {
             this.cache.shutdown();
             log.info("Shutting down cache[%s] DONE", cache.getName());
-
           } catch (IOException e) {
-            log.error("Shutting down cache[%s] FAILED", cache.getName());
-            log.error(e);
+            log.error(e, "Shutting down cache[%s] FAILED", cache.getName());
           }
         }));
-        log.error("CFRCM shutdown hook registered");
       }
     }
     
@@ -165,6 +165,7 @@ public class CarrotFragmentResultCacheManager
           // Do we need admission controller?
           if (acEnabled) {
             builder.withAdmissionController(AQBasedAdmissionController.class.getName());
+            builder.withAdmissionQueueStartSizeRatio(cacheAdmissionQueueSizeRatio);
           }
           return builder.buildDiskCache();
       }
