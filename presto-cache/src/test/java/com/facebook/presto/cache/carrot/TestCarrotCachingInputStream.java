@@ -25,6 +25,7 @@ import java.lang.management.ManagementFactory;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.util.Random;
+import java.util.concurrent.Callable;
 
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
@@ -44,6 +45,7 @@ import com.carrot.cache.util.Epoch;
 import com.carrot.cache.util.Utils;
 import com.facebook.airlift.log.Logger;
 import com.facebook.presto.cache.CacheConfig;
+import com.facebook.presto.cache.carrot.util.Stats;
 
 import io.airlift.units.DataSize;
 import io.airlift.units.DataSize.Unit;
@@ -248,11 +250,17 @@ public class TestCarrotCachingInputStream {
   
   private void runTestRandomAccess() throws IOException {
     
-    FSDataInputStream extStream = getExternalStream();
+    final FSDataInputStream extStream = getExternalStream();
+    Callable<FSDataInputStream> extStreamCall = new Callable<FSDataInputStream>() {
+      @Override
+      public FSDataInputStream call() throws Exception {
+        return extStream;
+      }
+    };
     long fileLength = fileSize.toBytes();
     try (
         CarrotCachingInputStream carrotStream = new CarrotCachingInputStream(cache,
-            new Path(this.sourceFile.toURI()), extStream, fileLength, pageSize, ioBufferSize);) 
+            new Path(this.sourceFile.toURI()), extStreamCall, 0, fileLength, pageSize, ioBufferSize, new Stats(), null);) 
     {
       FSDataInputStream cacheStream = new FSDataInputStream(carrotStream);
       int numRecords = (int) (fileSize.toBytes() / pageSize);
@@ -301,11 +309,16 @@ public class TestCarrotCachingInputStream {
   }
   
   private void runTestRandomSequentialAccess() throws IOException {
-    FSDataInputStream extStream = getExternalStream();
-    long fileLength = fileSize.toBytes();
+    final FSDataInputStream extStream = getExternalStream();
+    Callable<FSDataInputStream> extStreamCall = new Callable<FSDataInputStream>() {
+      @Override
+      public FSDataInputStream call() throws Exception {
+        return extStream;
+      }
+    };    long fileLength = fileSize.toBytes();
 
     try (CarrotCachingInputStream carrotStream = new CarrotCachingInputStream(cache,
-        new Path(this.sourceFile.toURI()), extStream, fileLength, pageSize, ioBufferSize);) {
+        new Path(this.sourceFile.toURI()), extStreamCall, 0, fileLength, pageSize, ioBufferSize, new Stats(), null);) {
 
       FSDataInputStream cacheStream = new FSDataInputStream(carrotStream);
       int numRecords = (int) (fileSize.toBytes() / pageSize);
@@ -353,11 +366,17 @@ public class TestCarrotCachingInputStream {
   }
   
   private void runTestSequentialAccess() throws IOException {
-    FSDataInputStream extStream = getExternalStream();
+    final FSDataInputStream extStream = getExternalStream();
+    Callable<FSDataInputStream> extStreamCall = new Callable<FSDataInputStream>() {
+      @Override
+      public FSDataInputStream call() throws Exception {
+        return extStream;
+      }
+    };
     long fileLength = fileSize.toBytes();
 
     try (CarrotCachingInputStream carrotStream = new CarrotCachingInputStream(cache,
-        new Path(this.sourceFile.toURI()), extStream, fileLength, pageSize, ioBufferSize);) {
+        new Path(this.sourceFile.toURI()), extStreamCall, 0, fileLength, pageSize, ioBufferSize, new Stats(), null);) {
 
       FSDataInputStream cacheStream = new FSDataInputStream(carrotStream);
       int requestSize = 8 * 1024;
@@ -386,11 +405,17 @@ public class TestCarrotCachingInputStream {
   }
   
   private void runTestSequentialAccessByteBuffer(boolean direct) throws IOException {
-    FSDataInputStream extStream = getExternalStream();
+    final FSDataInputStream extStream = getExternalStream();
+    Callable<FSDataInputStream> extStreamCall = new Callable<FSDataInputStream>() {
+      @Override
+      public FSDataInputStream call() throws Exception {
+        return extStream;
+      }
+    };    
     long fileLength = fileSize.toBytes();
 
     try (CarrotCachingInputStream carrotStream = new CarrotCachingInputStream(cache,
-        new Path(this.sourceFile.toURI()), extStream, fileLength, pageSize, ioBufferSize);) {
+        new Path(this.sourceFile.toURI()), extStreamCall, 0, fileLength, pageSize, ioBufferSize, new Stats(), null);) {
 
       FSDataInputStream cacheStream = new FSDataInputStream(carrotStream);
       int requestSize = 8 * 1024;

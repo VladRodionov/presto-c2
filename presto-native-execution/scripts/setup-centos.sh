@@ -14,7 +14,7 @@
 set -e
 set -x
 
-export FB_OS_VERSION=v2022.07.11.00
+export FB_OS_VERSION=v2022.11.14.00
 export nproc=$(getconf _NPROCESSORS_ONLN)
 
 dnf install -y maven
@@ -24,7 +24,7 @@ dnf install -y clang-tools-extra
 dnf install -y jq
 dnf install -y perl-XML-XPath
 
-python3 -m pip install regex pyyaml chevron black
+python3 -m pip install regex pyyaml chevron black six
 
 # Required for Antlr4
 dnf install -y libuuid-devel

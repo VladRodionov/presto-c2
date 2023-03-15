@@ -12,9 +12,12 @@
  * limitations under the License.
  */
 #include "presto_cpp/main/TaskManager.h"
+#include <folly/executors/ThreadedExecutor.h>
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "presto_cpp/main/PrestoExchangeSource.h"
 #include "presto_cpp/main/TaskResource.h"
+#include "presto_cpp/main/common/Configs.h"
 #include "presto_cpp/main/tests/HttpServerWrapper.h"
 #include "velox/common/base/Fs.h"
 #include "velox/common/file/FileSystems.h"
@@ -33,6 +36,9 @@
 #include "velox/serializers/PrestoSerializer.h"
 #include "velox/type/Type.h"
 
+DECLARE_int32(old_task_ms);
+
+using namespace ::testing;
 using namespace facebook::velox;
 using namespace facebook::presto;
 
@@ -117,7 +123,7 @@ class Cursor {
   }
 
   memory::MemoryPool* pool_;
-  memory::MappedMemory* mappedMemory_ = memory::MappedMemory::getInstance();
+  memory::MemoryAllocator* allocator_ = memory::MemoryAllocator::getInstance();
   TaskManager* taskManager_;
   const protocol::TaskId taskId_;
   RowTypePtr rowType_;
@@ -199,7 +205,7 @@ class TaskManagerTest : public testing::Test {
     dwrf::WriterOptions options;
     options.config = std::make_shared<facebook::velox::dwrf::Config>();
     options.schema = rowType_;
-    auto sink = std::make_unique<dwio::common::FileSink>(
+    auto sink = std::make_unique<dwio::common::LocalFileSink>(
         filePath, dwio::common::MetricsLog::voidLog());
     dwrf::Writer writer{options, std::move(sink), *pool_};
 
@@ -475,6 +481,7 @@ class TaskManagerTest : public testing::Test {
     } else {
       auto resultsOrFailures =
           fetchAllResults(outputTaskInfo->taskId, finalOutputType, allTaskIds);
+      EXPECT_TRUE(resultsOrFailures.status != nullptr);
       EXPECT_EQ(resultsOrFailures.status->state, protocol::TaskState::FAILED);
       for (const auto& taskId : allTaskIds) {
         taskManager_->deleteTask(taskId, true);
@@ -511,13 +518,36 @@ class TaskManagerTest : public testing::Test {
         taskInfo->stats.peakTotalMemoryInBytes);
   }
 
-  void setMemoryLimits(uint64_t userMax, uint64_t totalMax) {
+  void setMemoryLimits(uint64_t maxMemory) {
     taskManager_->getQueryContextManager()->overrideProperties(
         QueryContextManager::kQueryMaxMemoryPerNode,
-        fmt::format("{}B", userMax));
-    taskManager_->getQueryContextManager()->overrideProperties(
-        QueryContextManager::kQueryMaxTotalMemoryPerNode,
-        fmt::format("{}B", totalMax));
+        fmt::format("{}B", maxMemory));
+  }
+
+  // Setup the temporary spilling directory and initialize the system config
+  // file (in the same temporary directory) to contain the spilling path
+  // setting.
+  static std::shared_ptr<exec::test::TempDirectoryPath> setupSpillPath() {
+    auto spillDirectory = exec::test::TempDirectoryPath::create();
+    auto sysConfigFilePath =
+        fmt::format("{}/config.properties", spillDirectory->path);
+    auto fileSystem = filesystems::getFileSystem(sysConfigFilePath, nullptr);
+    auto sysConfigFile = fileSystem->openFileForWrite(sysConfigFilePath);
+    sysConfigFile->append(fmt::format(
+        "{}={}\n", SystemConfig::kSpillerSpillPath, spillDirectory->path));
+    sysConfigFile->close();
+    SystemConfig::instance()->initialize(sysConfigFilePath);
+    return spillDirectory;
+  }
+
+  std::shared_ptr<exec::Task> createDummyExecTask(
+      const std::string& taskId,
+      const core::PlanFragment& planFragment) {
+    auto queryCtx =
+        taskManager_->getQueryContextManager()->findOrCreateQueryCtx(
+            taskId, {}, {});
+    return std::make_shared<exec::Task>(
+        taskId, planFragment, 0, std::move(queryCtx));
   }
 
   std::shared_ptr<memory::MemoryPool> pool_;
@@ -553,6 +583,60 @@ TEST_F(TaskManagerTest, tableScanAllSplitsAtOnce) {
       taskId, planFragment, {source}, {}, {}, {});
 
   assertResults(taskId, rowType_, "SELECT * FROM tmp WHERE c0 % 5 = 0");
+}
+
+TEST_F(TaskManagerTest, taskCleanupWithPendingResultData) {
+  // Trigger old task cleanup immediately.
+  FLAGS_old_task_ms = 0;
+  auto filePaths = makeFilePaths(5);
+  auto vectors = makeVectors(filePaths.size(), 1'000);
+  for (int i = 0; i < filePaths.size(); i++) {
+    writeToFile(filePaths[i]->path, vectors[i]);
+  }
+
+  auto planFragment = exec::test::PlanBuilder()
+                          .tableScan(rowType_)
+                          .filter("c0 % 5 = 0")
+                          .partitionedOutput({}, 1, {"c0", "c1"})
+                          .planFragment();
+
+  long splitSequenceId{0};
+  auto source = makeSource("0", filePaths, true, splitSequenceId);
+
+  const protocol::TaskId taskId = "scan.0.0.1";
+  const auto taskInfo = taskManager_->createOrUpdateTask(
+      taskId, planFragment, {source}, {}, {}, {});
+
+  const protocol::Duration longWait("300s");
+  const auto maxSize = protocol::DataSize("32MB");
+  auto resultRequestState = http::CallbackRequestHandlerState::create();
+  auto results =
+      taskManager_
+          ->getResults(taskId, 0, 0, maxSize, longWait, resultRequestState)
+          .getVia(folly::EventBaseManager::get()->getEventBase());
+
+  std::exception e;
+  taskManager_->createOrUpdateErrorTask(taskId, std::make_exception_ptr(e));
+  taskManager_->deleteTask(taskId, true);
+  for (int i = 0; i < 10; ++i) {
+    // 'results' holds a reference on the presto task which prevents the old
+    // task cleanup.
+    const auto numCleanupTasks = taskManager_->cleanOldTasks();
+    ASSERT_EQ(numCleanupTasks, 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+  // Clear the results which releases the reference on the presto tasks.
+  results.reset();
+  // Wait until the task gets cleanup.
+  for (;;) {
+    // 'results' holds a reference on the presto task which prevents the old
+    // task cleanup.
+    const auto numCleanupTasks = taskManager_->cleanOldTasks();
+    if (numCleanupTasks == 1) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
 }
 
 // Runs "select * from t where c0 % 5 = 1" query.
@@ -648,7 +732,10 @@ TEST_F(TaskManagerTest, emptyFile) {
     if (not taskStatus->failures.empty()) {
       EXPECT_EQ(1, taskStatus->failures.size());
       const auto& failure = taskStatus->failures.front();
-      EXPECT_EQ("fileLength_ > 0 ORC file is empty", failure.message);
+      EXPECT_THAT(
+          failure.message,
+          testing::ContainsRegex(
+              "fileLength_ > 0 ORC file is empty Split \\[.*\\] Task scan\\.0\\.0\\.1"));
       EXPECT_EQ("VeloxException", failure.type);
       break;
     }
@@ -679,15 +766,11 @@ TEST_F(TaskManagerTest, outOfQueryUserMemory) {
 
   auto [peakUser, peakTotal] = testCountAggregation("initial", filePaths);
 
-  setMemoryLimits(peakUser - 1, 20 * kGB);
+  setMemoryLimits(peakUser - 1);
   testCountAggregation("max-memory", filePaths, {}, true);
 
-  // Verify query.max-total-memory-per-node is respected.
-  setMemoryLimits(20 * kGB, peakTotal - 1);
-  testCountAggregation("max-total-memory", filePaths, {}, true);
-
   // Verify the query is successful with some limits.
-  setMemoryLimits(20 * kGB, 20 * kGB);
+  setMemoryLimits(20 * kGB);
   testCountAggregation("test-count-aggr", filePaths);
 
   // Wait a little to allow for futures to complete.
@@ -801,15 +884,14 @@ TEST_F(TaskManagerTest, aggregationSpill) {
   }
   duckDbQueryRunner_.createTable("tmp", vectors);
 
-  // Keep bumping up query id per each test iteration to generate a new query
-  // id.
+  // Keep bumping up queryId per each test iteration to generate a new query id.
   int queryId = 0;
-  for (const bool doSpill : {true, true}) {
+  for (const bool doSpill : {false, true}) {
     SCOPED_TRACE(fmt::format("doSpill: {}", doSpill));
-    auto tempDirectory = exec::test::TempDirectoryPath::create();
+    std::shared_ptr<exec::test::TempDirectoryPath> spillDirectory;
     std::unordered_map<std::string, std::string> queryConfigs;
     if (doSpill) {
-      queryConfigs.emplace(core::QueryConfig::kSpillPath, tempDirectory->path);
+      spillDirectory = TaskManagerTest::setupSpillPath();
       queryConfigs.emplace(core::QueryConfig::kTestingSpillPct, "100");
       queryConfigs.emplace(core::QueryConfig::kSpillEnabled, "true");
       queryConfigs.emplace(core::QueryConfig::kAggregationSpillEnabled, "true");
@@ -821,6 +903,80 @@ TEST_F(TaskManagerTest, aggregationSpill) {
         false,
         doSpill);
   }
+}
+
+TEST_F(TaskManagerTest, buildTaskSpillDirectoryPath) {
+  EXPECT_EQ(
+      "fs::/base/2022-12-20/presto_native/20221220-Q/Task1/",
+      TaskManager::buildTaskSpillDirectoryPath(
+          "fs::/base", "20221220-Q", "Task1"));
+  EXPECT_EQ(
+      "fsx::/root/1970-01-01/presto_native/Q100/Task22/",
+      TaskManager::buildTaskSpillDirectoryPath("fsx::/root", "Q100", "Task22"));
+}
+
+TEST_F(TaskManagerTest, getDataOnAbortedTask) {
+  // Simulate scenario where Driver encountered a VeloxException and terminated
+  // a task, which removes the entry in BufferManager. The main taskmanager
+  // tries to process the resultRequest and calls getData() which must return
+  // false. The resultRequest must be marked incomplete.
+  auto planFragment = exec::test::PlanBuilder()
+                          .tableScan(rowType_)
+                          .filter("c0 % 5 = 0")
+                          .partitionedOutput({}, 1, {"c0", "c1"})
+                          .planFragment();
+
+  int token = 123;
+  auto scanTaskId = "scan.0.0.1";
+  bool promiseFulfilled = false;
+  auto prestoTask = std::make_shared<PrestoTask>(scanTaskId);
+  auto [promise, f] = folly::makePromiseContract<std::unique_ptr<Result>>();
+  folly::ThreadedExecutor executor;
+  folly::Future<std::unique_ptr<Result>> semiFuture =
+      std::move(f).via(&executor);
+  // Future is invoked when a value is set on the promise.
+  auto future =
+      move(semiFuture)
+          .thenValue([&promiseFulfilled,
+                      token](std::unique_ptr<Result> result) {
+            ASSERT_EQ(result->complete, false);
+            ASSERT_EQ(
+                result->data->capacity(), folly::IOBuf::create(0)->capacity());
+            ASSERT_EQ(result->sequence, token);
+            promiseFulfilled = true;
+          });
+  auto promiseHolder = std::make_shared<PromiseHolder<std::unique_ptr<Result>>>(
+      std::move(promise));
+  auto request = std::make_unique<ResultRequest>();
+  request->promise = folly::to_weak_ptr(promiseHolder);
+  request->taskId = scanTaskId;
+  request->bufferId = 0;
+  request->token = token;
+  request->maxSize = protocol::DataSize("32MB");
+  prestoTask->resultRequests.insert({0, std::move(request)});
+  prestoTask->task = createDummyExecTask(scanTaskId, planFragment);
+  taskManager_->getDataForResultRequests(prestoTask->resultRequests);
+  std::move(future).get();
+  ASSERT_TRUE(promiseFulfilled);
+}
+
+TEST_F(TaskManagerTest, getResultsErrorPropagation) {
+  const protocol::TaskId taskId = "error-task.0.0.0";
+  std::exception e;
+  taskManager_->createOrUpdateErrorTask(taskId, std::make_exception_ptr(e));
+
+  // We expect the exception type VeloxException to be reserved still.
+  EXPECT_THROW(
+      taskManager_
+          ->getResults(
+              taskId,
+              0,
+              0,
+              protocol::DataSize("32MB"),
+              protocol::Duration("300s"),
+              http::CallbackRequestHandlerState::create())
+          .get(),
+      VeloxException);
 }
 
 // TODO: add disk spilling test for order by and hash join later.

@@ -24,6 +24,7 @@ import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.TableHandle;
+import com.facebook.presto.spi.VariableAllocator;
 import com.facebook.presto.spi.constraints.TableConstraint;
 import com.facebook.presto.spi.plan.AggregationNode;
 import com.facebook.presto.spi.plan.Assignments;
@@ -95,12 +96,15 @@ import javax.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.IntStream;
 
 import static com.facebook.presto.SystemSessionProperties.getQueryAnalyzerTimeout;
 import static com.facebook.presto.common.type.TypeUtils.isEnumType;
@@ -112,6 +116,7 @@ import static com.facebook.presto.sql.analyzer.ExpressionTreeUtils.getSourceLoca
 import static com.facebook.presto.sql.analyzer.ExpressionTreeUtils.isEqualComparisonExpression;
 import static com.facebook.presto.sql.analyzer.ExpressionTreeUtils.resolveEnumLiteral;
 import static com.facebook.presto.sql.analyzer.SemanticExceptions.notSupportedException;
+import static com.facebook.presto.sql.planner.PlannerUtils.newVariable;
 import static com.facebook.presto.sql.planner.plan.AssignmentUtils.identitiesAsSymbolReferences;
 import static com.facebook.presto.sql.relational.OriginalExpressionUtils.asSymbolReference;
 import static com.facebook.presto.sql.relational.OriginalExpressionUtils.castToRowExpression;
@@ -120,13 +125,14 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static java.util.Objects.requireNonNull;
 
 class RelationPlanner
         extends DefaultTraversalVisitor<RelationPlan, SqlPlannerContext>
 {
     private final Analysis analysis;
-    private final PlanVariableAllocator variableAllocator;
+    private final VariableAllocator variableAllocator;
     private final PlanNodeIdAllocator idAllocator;
     private final Map<NodeRef<LambdaArgumentDeclaration>, VariableReferenceExpression> lambdaDeclarationToVariableMap;
     private final Metadata metadata;
@@ -135,7 +141,7 @@ class RelationPlanner
 
     RelationPlanner(
             Analysis analysis,
-            PlanVariableAllocator variableAllocator,
+            VariableAllocator variableAllocator,
             PlanNodeIdAllocator idAllocator,
             Map<NodeRef<LambdaArgumentDeclaration>, VariableReferenceExpression> lambdaDeclarationToVariableMap,
             Metadata metadata,
@@ -215,7 +221,7 @@ class RelationPlanner
             for (int i = 0; i < subPlan.getDescriptor().getAllFieldCount(); i++) {
                 Field field = subPlan.getDescriptor().getFieldByIndex(i);
                 if (!field.isHidden()) {
-                    VariableReferenceExpression aliasedColumn = variableAllocator.newVariable(mappings.get(i).getSourceLocation(), field);
+                    VariableReferenceExpression aliasedColumn = newVariable(variableAllocator, mappings.get(i).getSourceLocation(), field);
                     assignments.put(aliasedColumn, castToRowExpression(asSymbolReference(subPlan.getFieldMappings().get(i))));
                     newMappings.add(aliasedColumn);
                 }
@@ -509,7 +515,7 @@ class RelationPlanner
             Type type = analysis.getType(identifier);
 
             // compute the coercion for the field on the left to the common supertype of left & right
-            VariableReferenceExpression leftOutput = variableAllocator.newVariable(identifier, type);
+            VariableReferenceExpression leftOutput = newVariable(variableAllocator, identifier, type);
             int leftField = joinAnalysis.getLeftJoinFields().get(i);
             leftCoercions.put(leftOutput, castToRowExpression(new Cast(
                     identifier.getLocation(),
@@ -520,7 +526,7 @@ class RelationPlanner
             leftJoinColumns.put(identifier, leftOutput);
 
             // compute the coercion for the field on the right to the common supertype of left & right
-            VariableReferenceExpression rightOutput = variableAllocator.newVariable(identifier, type);
+            VariableReferenceExpression rightOutput = newVariable(variableAllocator, identifier, type);
             int rightField = joinAnalysis.getRightJoinFields().get(i);
             rightCoercions.put(rightOutput, castToRowExpression(new Cast(
                     identifier.getLocation(),
@@ -559,7 +565,7 @@ class RelationPlanner
 
         ImmutableList.Builder<VariableReferenceExpression> outputs = ImmutableList.builder();
         for (Identifier column : joinColumns) {
-            VariableReferenceExpression output = variableAllocator.newVariable(column, analysis.getType(column));
+            VariableReferenceExpression output = newVariable(variableAllocator, column, analysis.getType(column));
             outputs.add(output);
             assignments.put(output, castToRowExpression(new CoalesceExpression(
                     column.getLocation(),
@@ -628,7 +634,7 @@ class RelationPlanner
         // Create variables for the result of unnesting
         ImmutableList.Builder<VariableReferenceExpression> unnestedVariablesBuilder = ImmutableList.builder();
         for (Field field : unnestOutputDescriptor.getVisibleFields()) {
-            VariableReferenceExpression variable = variableAllocator.newVariable(field);
+            VariableReferenceExpression variable = newVariable(variableAllocator, field);
             unnestedVariablesBuilder.add(variable);
         }
         ImmutableList<VariableReferenceExpression> unnestedVariables = unnestedVariablesBuilder.build();
@@ -641,34 +647,85 @@ class RelationPlanner
 
         ImmutableMap.Builder<VariableReferenceExpression, List<VariableReferenceExpression>> unnestVariables = ImmutableMap.builder();
         UnmodifiableIterator<VariableReferenceExpression> unnestedVariablesIterator = unnestedVariables.iterator();
+        // To deal with duplicate expressions in unnest
+        Set<VariableReferenceExpression> usedInputVariables = new HashSet<>();
+        ImmutableMap.Builder<VariableReferenceExpression, VariableReferenceExpression> unnestOutputMappingBuilder = ImmutableMap.builder();
         for (Expression expression : node.getExpressions()) {
             Type type = analysis.getType(expression);
             VariableReferenceExpression inputVariable = new VariableReferenceExpression(getSourceLocation(expression), translations.get(expression).getName(), type);
+            boolean isDuplicate = usedInputVariables.contains(inputVariable);
+            usedInputVariables.add(inputVariable);
+            ImmutableList.Builder<VariableReferenceExpression> unnestVariableBuilder = ImmutableList.builder();
             if (type instanceof ArrayType) {
                 Type elementType = ((ArrayType) type).getElementType();
                 if (!SystemSessionProperties.isLegacyUnnest(session) && elementType instanceof RowType) {
-                    ImmutableList.Builder<VariableReferenceExpression> unnestVariableBuilder = ImmutableList.builder();
                     for (int i = 0; i < ((RowType) elementType).getFields().size(); i++) {
                         unnestVariableBuilder.add(unnestedVariablesIterator.next());
                     }
-                    unnestVariables.put(inputVariable, unnestVariableBuilder.build());
                 }
                 else {
-                    unnestVariables.put(inputVariable, ImmutableList.of(unnestedVariablesIterator.next()));
+                    unnestVariableBuilder.add(unnestedVariablesIterator.next());
                 }
             }
             else if (type instanceof MapType) {
-                unnestVariables.put(inputVariable, ImmutableList.of(unnestedVariablesIterator.next(), unnestedVariablesIterator.next()));
+                unnestVariableBuilder.addAll(ImmutableList.of(unnestedVariablesIterator.next(), unnestedVariablesIterator.next()));
             }
             else {
                 throw new IllegalArgumentException("Unsupported type for UNNEST: " + type);
+            }
+            // Skip adding to output of unnest node if it's a duplicate, it will be output from a projection node added on top of unnest node.
+            if (isDuplicate) {
+                unnestOutputMappingBuilder.putAll(buildOutputMapping(unnestVariables.build().get(inputVariable), unnestVariableBuilder.build()));
+            }
+            else {
+                unnestVariables.put(inputVariable, unnestVariableBuilder.build());
             }
         }
         Optional<VariableReferenceExpression> ordinalityVariable = node.isWithOrdinality() ? Optional.of(unnestedVariablesIterator.next()) : Optional.empty();
         checkState(!unnestedVariablesIterator.hasNext(), "Not all output variables were matched with input variables");
 
         UnnestNode unnestNode = new UnnestNode(getSourceLocation(node), idAllocator.getNextId(), projectNode, leftPlan.getFieldMappings(), unnestVariables.build(), ordinalityVariable);
+        // If there are duplicate items, we need to add a projection node to project the output of skipped duplicates
+        ImmutableMap<VariableReferenceExpression, VariableReferenceExpression> unnestOutputMapping = unnestOutputMappingBuilder.build();
+        if (!unnestOutputMapping.isEmpty()) {
+            ProjectNode dedupProjectionNode = projectUnnestWithDuplicates(unnestedVariables, unnestOutputMapping, unnestNode);
+            return new RelationPlan(dedupProjectionNode, analysis.getScope(joinNode), dedupProjectionNode.getOutputVariables());
+        }
         return new RelationPlan(unnestNode, analysis.getScope(joinNode), unnestNode.getOutputVariables());
+    }
+
+    private Map<VariableReferenceExpression, VariableReferenceExpression> buildOutputMapping(
+            List<VariableReferenceExpression> input,
+            List<VariableReferenceExpression> output)
+    {
+        checkState(output.size() == input.size());
+        IntStream.range(0, output.size()).boxed().forEach(index -> checkState(output.get(index).getType().equals(input.get(index).getType())));
+        return IntStream.range(0, output.size()).boxed().collect(toImmutableMap(index -> output.get(index), index -> input.get(index)));
+    }
+
+    private ProjectNode projectUnnestWithDuplicates(
+            List<VariableReferenceExpression> completeUnnestedOutput,
+            Map<VariableReferenceExpression, VariableReferenceExpression> duplicateUnnestOutputMapping,
+            UnnestNode unnestNode)
+    {
+        Assignments.Builder projections = Assignments.builder();
+        // The projection output needs to respect the order of unnest output
+        // first add replicated variables
+        projections.putAll(unnestNode.getReplicateVariables().stream().collect(toImmutableMap(Function.identity(), v -> castToRowExpression(createSymbolReference(v)))));
+        // then add unnested variables
+        for (VariableReferenceExpression unnestedVariable : completeUnnestedOutput) {
+            if (duplicateUnnestOutputMapping.containsKey(unnestedVariable)) {
+                projections.put(unnestedVariable, castToRowExpression(createSymbolReference(duplicateUnnestOutputMapping.get(unnestedVariable))));
+            }
+            else {
+                projections.put(unnestedVariable, castToRowExpression(createSymbolReference(unnestedVariable)));
+            }
+        }
+        // Finally add ordinalityVariable
+        if (unnestNode.getOrdinalityVariable().isPresent()) {
+            projections.put(unnestNode.getOrdinalityVariable().get(), castToRowExpression(createSymbolReference(unnestNode.getOrdinalityVariable().get())));
+        }
+        return new ProjectNode(idAllocator.getNextId(), unnestNode, projections.build());
     }
 
     @Override
@@ -697,7 +754,7 @@ class RelationPlanner
         Scope scope = analysis.getScope(node);
         ImmutableList.Builder<VariableReferenceExpression> outputVariablesBuilder = ImmutableList.builder();
         for (Field field : scope.getRelationType().getVisibleFields()) {
-            outputVariablesBuilder.add(variableAllocator.newVariable(field));
+            outputVariablesBuilder.add(newVariable(variableAllocator, field));
         }
 
         ImmutableList.Builder<List<RowExpression>> rowsBuilder = ImmutableList.builder();
@@ -746,7 +803,7 @@ class RelationPlanner
         Scope scope = analysis.getScope(node);
         ImmutableList.Builder<VariableReferenceExpression> outputVariablesBuilder = ImmutableList.builder();
         for (Field field : scope.getRelationType().getVisibleFields()) {
-            VariableReferenceExpression variable = variableAllocator.newVariable(field);
+            VariableReferenceExpression variable = newVariable(variableAllocator, field);
             outputVariablesBuilder.add(variable);
         }
         List<VariableReferenceExpression> unnestedVariables = outputVariablesBuilder.build();
@@ -761,7 +818,7 @@ class RelationPlanner
             Expression rewritten = Coercer.addCoercions(expression, analysis);
             rewritten = ExpressionTreeRewriter.rewriteWith(new ParameterRewriter(analysis), rewritten);
             values.add(castToRowExpression(rewritten));
-            VariableReferenceExpression input = variableAllocator.newVariable(rewritten, type);
+            VariableReferenceExpression input = newVariable(variableAllocator, rewritten, type);
             argumentVariables.add(new VariableReferenceExpression(getSourceLocation(rewritten), input.getName(), type));
             if (type instanceof ArrayType) {
                 Type elementType = ((ArrayType) type).getElementType();
@@ -827,13 +884,13 @@ class RelationPlanner
             Type outputType = targetColumnTypes[i];
             if (!outputType.equals(inputVariable.getType())) {
                 Expression cast = new Cast(createSymbolReference(inputVariable), outputType.getTypeSignature().toString());
-                VariableReferenceExpression outputVariable = variableAllocator.newVariable(cast, outputType);
+                VariableReferenceExpression outputVariable = newVariable(variableAllocator, cast, outputType);
                 assignments.put(outputVariable, castToRowExpression(cast));
                 newVariables.add(outputVariable);
             }
             else {
                 SymbolReference symbolReference = new SymbolReference(oldField.getNodeLocation(), inputVariable.getName());
-                VariableReferenceExpression outputVariable = variableAllocator.newVariable(symbolReference, outputType);
+                VariableReferenceExpression outputVariable = newVariable(variableAllocator, symbolReference, outputType);
                 assignments.put(outputVariable, castToRowExpression(symbolReference));
                 newVariables.add(outputVariable);
             }

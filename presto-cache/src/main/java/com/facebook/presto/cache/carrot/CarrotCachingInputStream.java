@@ -13,13 +13,16 @@
  */
 package com.facebook.presto.cache.carrot;
 
-import static com.google.common.hash.Hashing.md5;
-import static java.nio.charset.StandardCharsets.UTF_8;
+import static com.facebook.presto.cache.carrot.util.Utils.checkArgument;
+import static com.facebook.presto.cache.carrot.util.Utils.checkState;
+import static com.facebook.presto.cache.carrot.util.Utils.getBaseKey;
+import static com.facebook.presto.cache.carrot.util.Utils.getKey;
 
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.util.concurrent.Callable;
 
 import javax.annotation.concurrent.NotThreadSafe;
 
@@ -31,25 +34,66 @@ import org.apache.hadoop.fs.Seekable;
 
 import com.carrot.cache.Cache;
 import com.carrot.cache.io.ObjectPool;
-import com.carrot.cache.util.Utils;
 import com.facebook.airlift.log.Logger;
-import com.google.common.base.Preconditions;
+import com.facebook.presto.cache.carrot.util.ScanDetector;
+import com.facebook.presto.cache.carrot.util.Stats;
 
 @NotThreadSafe
 public class CarrotCachingInputStream extends InputStream 
   implements Seekable, PositionedReadable, ByteBufferReadable{
+  
+  /**
+   * Convenient class to keep file segment range
+   */
+  static class Range {
+    private long start;
+    private long size;
+    Range (long start, long size){
+      this.start = start;
+      this.size = size;
+    }
+    long getStart() {
+      return this.start;
+    }
+    long size() {
+      return this.size;
+    }
+  }
+  
+  private static Logger LOG = Logger.get(CarrotCachingInputStream.class);
 
-  private static final Logger LOG = Logger.get(CarrotCachingInputStream.class);
-
-  /** The length of the external file*/
+  /* Pool which keeps I/O buffers to read from cache directly */
+  private static ObjectPool<byte[]> ioPool = new ObjectPool<byte[]>(32);
+  
+  /* Pool which keeps page buffers to read from external source */
+  private static ObjectPool<byte[]> pagePool = new ObjectPool<byte[]>(32);  
+  
+  static synchronized void initIOPools(int size) {
+    if (ioPool == null || ioPool.getMaxSize() != size) {
+      ioPool = new ObjectPool<byte[]>(size);
+    }
+    if (pagePool == null || pagePool.getMaxSize() != size) {
+      pagePool = new ObjectPool<byte[]>(size);
+    }
+  }
+  
+  /**
+   * Path to the remote file
+   */
+  private Path path;
+  
+  /** The length of the remote file */
   private long fileLength;
   
   /** Key base for all data pages in this external file*/
   private byte[] baseKey;
   
-  /** The external file input stream */
-  private FSDataInputStream extInputStream;
+  /** The external file input stream future*/
+  private Callable<FSDataInputStream> remoteStreamCallable;
   
+  /** Remote input stream */
+  private FSDataInputStream remoteStream;
+    
   /** Carrot cache instance */
   private Cache cache;
   
@@ -63,7 +107,7 @@ public class CarrotCachingInputStream extends InputStream
   private byte[] buffer = null;
   
   /* Used to read page from the external stream */
-  private byte[] extBuffer = null;
+  private byte[] pageBuffer = null;
   
   /** I/O buffer start offset in the file*/
   private long bufferStartOffset;
@@ -71,60 +115,86 @@ public class CarrotCachingInputStream extends InputStream
   /** I/O buffer end offset in the file*/
   private long bufferEndOffset;
  
-  /** Current position of the stream, relative to the start of the file. */
-  private long position = 0;
+  /** 
+   * Current position of the stream, relative to the start of the file. 
+   * This position is the source of truth for write cache stream and for remote stream
+   * When read is non - positional 
+   * */
+  private volatile long position = 0;
   
   /** Closed flag */
-  private boolean closed = false;
+  private volatile boolean closed = false;
   
   /** End of file reached */
-  private boolean EOF = false;
+  private volatile boolean EOF = false;
   
-  /* Pool which keeps I/O buffers to read from cache directly */
-  private static ObjectPool<byte[]> ioPool = new ObjectPool<byte[]>(32);
+  /** Just 'one' byte */
+  private byte[] one = new byte[1];
+
+  /** Statistics collector*/
+  private Stats stats;
   
-  /* Pool which keeps page buffers to read from external source */
-  private static ObjectPool<byte[]> pagePool = new ObjectPool<byte[]>(32);
+  /** TODO: real scan detector */
+  private ScanDetector sd;
   
-  static synchronized void initIOPools(int size) {
-    if (ioPool == null || ioPool.getMaxSize() != size) {
-      ioPool = new ObjectPool<byte[]>(size);
-    }
-    if (pagePool == null || pagePool.getMaxSize() != size) {
-      pagePool = new ObjectPool<byte[]>(size);
-    }
-  }
-  
+  private boolean scanDetected = false;
+
+
   /**
    * Constructor 
    * @param cache parent cache
    * @param path file path
-   * @param extInputStream external input stream
+   * @param remoteStreamCall external input stream callable
+   * @param cacheStreamCall cache input stream callable
+   * @param modTime modification time
    * @param fileLength file length
    * @param pageSize page size
-   * @param bufferSize I/O buffer size
+   * @param bufferSize I/O buffer size (at least as large as page size)
+   * @param stats statistics agent
+   * @param sd scan detector to detect long scan operations
+   * @param cacheOnRead can cache?
    */
-  public CarrotCachingInputStream(Cache cache, Path path, FSDataInputStream extInputStream, 
-      long fileLength, int pageSize, int bufferSize) {
+  public CarrotCachingInputStream(Cache cache, Path path, Callable<FSDataInputStream> remoteStreamCall, 
+     long modTime, long fileLength,
+       int pageSize, int bufferSize, Stats stats, ScanDetector sd) {
     this.cache = cache;
-    this.extInputStream = extInputStream;
+    this.remoteStreamCallable = remoteStreamCall;
     this.pageSize = pageSize;
     this.bufferSize = bufferSize;
+    // Adjust I/O buffer size
+    this.bufferSize = this.bufferSize / this.pageSize * this.pageSize;
+    if (this.bufferSize < bufferSize || bufferSize == 0) {
+      this.bufferSize += this.pageSize;
+    }
+    this.path = path;
     this.fileLength = fileLength;
-    initBaseKey(path);
+    this.baseKey = getBaseKey(path, modTime);
     // Must always be > 0 for performance 
     this.buffer = getIOBuffer();
-    this.extBuffer = getPageBuffer();
+    this.pageBuffer = getPageBuffer();
+    this.stats = stats;
+    this.sd = sd;
   }
-  
-  private byte[] getPageBuffer() {
-    byte[] buffer = pagePool.poll();
-    if (buffer == null) {
-      buffer = new byte[pageSize];
-    }
-    return buffer;
+    
+  /**
+   * Get statistics on this stream
+   * @return
+   */
+  public Stats getStatistics() {
+    return this.stats;
   }
-  
+  /**
+   * Get file path
+   * @return file path
+   */
+  public Path getFilePath() {
+    return this.path;
+  }
+    
+  /**
+   * Get I/O buffer from the pool
+   * @return buffer
+   */
   private byte[] getIOBuffer() {
     if (bufferSize > 0) {
       byte[] buffer = ioPool.poll();
@@ -136,21 +206,208 @@ public class CarrotCachingInputStream extends InputStream
     return null;
   }
   
-  @SuppressWarnings("deprecation")
-  private void initBaseKey(Path path) {
-    String hash =  md5().hashString(path.toString(), UTF_8).toString();
-    this.baseKey = new byte[hash.length() + Utils.SIZEOF_LONG];
-    System.arraycopy(hash.getBytes(), 0, this.baseKey, 0, hash.length());
-  }
-  
-  @Override
-  public int read(byte[] bytesBuffer, int offset, int length) throws IOException {
-    return readInternal(bytesBuffer, offset, length, position,
-        false);
+  /** 
+   * Get page buffer from the pool
+   * @return buffer
+   */
+  private byte[] getPageBuffer() {
+    byte[] buffer = pagePool.poll();
+    if (buffer == null) {
+      buffer = new byte[pageSize];
+    }
+    return buffer;
   }
 
-  public int read(ByteBuffer buffer, int offset, int length) throws IOException {
-    
+  /**
+   * Public API section
+   */
+  @Override
+  public synchronized int read(byte[] bytesBuffer, int offset, int length) throws IOException {
+    checkIfClosed();
+    this.stats.addTotalReadRequests(1);
+    int read = readInternal(bytesBuffer, offset, length, position,
+        false);
+    if (read > 0) {
+      this.stats.addTotalBytesRead(read);
+    }
+    return read;
+  }
+
+  @Override
+  public synchronized long skip(long n) throws IOException {
+    checkIfClosed();
+    if (n <= 0) {
+      return 0;
+    }
+    long toSkip = Math.min(remaining(), n);
+    position += toSkip;
+    //TODO: do we need to keep cache and remote stream in sync?
+//    getRemoteStream().skip(toSkip);
+//    this.cacheStream = getCacheStream();
+//    if (this.cacheStream != null) {
+//      try {
+//        this.cacheStream.skip(toSkip);
+//      } catch(IOException e) {
+//        //TODO: better handling exception
+//        LOG.error("Cached input stream skip", e);
+//        this.cacheStream = null;
+//        this.cacheStreamCallable = null;
+//      }
+//    }
+    return toSkip;
+  }
+
+  @Override
+  public void close() throws IOException {
+
+    // Do not throw exception
+    if (closed) {
+      return;
+    }
+    try {
+      getRemoteStream().close();
+    } catch (IOException e) {
+      LOG.error("Remote file {}", path);
+      LOG.error("Remote input stream close failed", e);
+    }
+    closed = true;
+    // release buffers
+    if (buffer != null) {
+      ioPool.offer(buffer);
+    }
+    if (pageBuffer != null) {
+      pagePool.offer(pageBuffer);
+    }
+  }
+
+  @Override
+  public synchronized long getPos() {
+    return position;
+  }
+
+  @Override
+  public synchronized void seek(long pos) throws IOException {
+    checkIfClosed();
+    checkArgument(pos >= 0, "Seek position is negative: " + pos);
+    checkArgument(pos <= this.fileLength,
+            "Seek position " + pos + " exceeds the length of the file " + this.fileLength);
+    if (pos == this.position) {
+      return;
+    }
+    if (pos < this.position) {
+      EOF = false;
+    }
+    this.position = pos;
+    //TODO: do we need to keep streams in sync?
+    // We use only positional reads on these streams
+//    getRemoteStream().seek(pos);
+//    this.cacheStream = getCacheStream();
+//    if (this.cacheStream != null) {
+//      try {
+//        this.cacheStream.seek(pos);
+//      } catch(IOException e) {
+//        //TODO: better handling exception
+//        LOG.error("Cached input stream seek", e);
+//        this.cacheStream = null;
+//        this.cacheStreamCallable = null;
+//      }
+//    }
+  }
+
+  @Override
+  public synchronized int available() throws IOException {
+    checkIfClosed();
+    return (int) remaining();
+  }
+
+  @Override
+  public synchronized int read() throws IOException {
+    checkIfClosed();
+    int n = read(one, 0, 1);
+    if (n == -1) {
+      return n;
+    }
+    return one[0] & 0xff;
+  }
+
+  @Override
+  public synchronized int read(byte[] buffer) throws IOException {
+    checkIfClosed();
+    return read(buffer, 0, buffer.length);
+  }
+
+  @Override
+  public synchronized int read(ByteBuffer buf) throws IOException {
+    checkIfClosed();
+    this.stats.addTotalReadRequests(1);
+    int read = read(buf, buf.position(), buf.remaining()); 
+    if (read > 0) {
+      this.stats.addTotalBytesRead(read);
+    }
+    return read;
+  }
+
+  @Override
+  public synchronized int read(long position, byte[] buffer, int offset, int length) throws IOException {
+    checkIfClosed();
+    this.stats.addTotalReadRequests(1);
+    int read = readInternal(buffer, offset, length,  position, true); 
+    if (read > 0) {
+      this.stats.addTotalBytesRead(read);
+    }
+    return read;
+  }
+
+  @Override
+  public synchronized void readFully(long position, byte[] buffer) throws IOException {
+    checkIfClosed();
+    readFully(position, buffer, 0, buffer.length);
+  }
+
+  @Override
+  public synchronized void readFully(long position, byte[] buffer, int offset, int length) throws IOException {
+    checkIfClosed();
+        
+    int totalBytesRead = 0;
+    while (totalBytesRead < length) {
+      int bytesRead =
+          read(position + totalBytesRead, buffer, offset + totalBytesRead, length - totalBytesRead);
+      if (bytesRead == -1) {
+        LOG.error("file length={} position={} totalBytesRead={} to read={}", 
+          fileLength, position, totalBytesRead, length - totalBytesRead);
+        throw new EOFException();
+      }
+      totalBytesRead += bytesRead;
+    }    
+  }
+
+  /**
+   * This method is not supported in {@link CarrotCachingInputStream}.
+   *
+   * @param targetPos N/A
+   * @return N/A
+   * @throws IOException always
+   */
+  @Override
+  public boolean seekToNewSource(long targetPos) throws IOException {
+    throw new IOException("seekToNewSource method is not supported.");
+  }
+  
+  /*** End of Public API **/
+  
+  private long remaining() {
+    return EOF ? 0 : this.fileLength - position;
+  }
+  
+  /**
+   * TODO: this method is not a public API
+   * @param buffer
+   * @param offset
+   * @param length
+   * @return
+   * @throws IOException
+   */
+  private int read(ByteBuffer buffer, int offset, int length) throws IOException {
     if (buffer.hasArray()) {
       byte[] buf  = buffer.array();
       int totalBytesRead = readInternal(buf, offset, length, position, false);
@@ -169,76 +426,398 @@ public class CarrotCachingInputStream extends InputStream
     }
     buffer.position(offset);
     buffer.put(bytesBuffer, 0, totalBytesRead);
-    if (bytesBuffer.length == bufferSize) {
+    if (length <= bufferSize) {
       // release buffer back to the I/O pool
       ioPool.offer(bytesBuffer);
     }
     return totalBytesRead;
   }
 
-  private int bufferedRead(byte[] bytesBuffer, int offset, int length,
-                           long position) throws IOException {
-    if (buffer == null) { //buffer is disabled, read data from local cache directly.
-      return localCachedRead(bytesBuffer, offset, length, position);
-    }
-    //hit or partially hit the in stream buffer
-    if (position >= bufferStartOffset && position < bufferEndOffset) {
-      int lengthToReadFromBuffer = (int) Math.min(length,
-          bufferEndOffset - position);
-      System.arraycopy(buffer, (int) (position - bufferStartOffset),
-          bytesBuffer, offset, lengthToReadFromBuffer);
-      
-      return lengthToReadFromBuffer;
-    }
-    if (length >= bufferSize) {
-      // Skip load to the in stream buffer if the data piece is larger than buffer size
-      return localCachedRead(bytesBuffer, offset, length, position);
-    }
-    int bytesLoadToBuffer = (int) Math.min(bufferSize, this.fileLength - position);
-    int bytesRead =
-        localCachedRead(buffer, 0, bytesLoadToBuffer, position);
-    bufferStartOffset = position;
-    bufferEndOffset = position + bytesRead;
-    int dataReadFromBuffer = Math.min(bytesRead, length);
-    System.arraycopy(buffer, 0, bytesBuffer, offset, dataReadFromBuffer);
-    
-    return dataReadFromBuffer;
-  }
-
-  private int localCachedRead(byte[] bytesBuffer, int offset, int length, 
+  private int readCachedPage(byte[] bytesBuffer, int offset, int length, 
                               long position) throws IOException {
-    long currentPage = position / pageSize;
+    long currentPage = position / this.pageSize;
    
-    int currentPageOffset = (int) (position % pageSize);
+    int currentPageOffset = (int) (position % this.pageSize);
     // This is the assumption which is not always correct ???
-    int bytesLeftInPage = (int) (pageSize - currentPageOffset);
+    int bytesLeftInPage = (int) (this.pageSize - currentPageOffset);
     int bytesToReadInPage = Math.min(bytesLeftInPage, length);
-    byte[] key = getKey(currentPage * pageSize);
+    byte[] key = getKey(this.baseKey, currentPage * this.pageSize, this.pageSize);
     
-    int bytesRead = (int) cache.getRange(key, 0, key.length, currentPageOffset, bytesToReadInPage,
-        true, bytesBuffer, offset);
+    int bytesRead = (int) dataPageGetRange(key,  currentPageOffset, bytesToReadInPage, bytesBuffer, offset);
     if (bytesRead > 0) {
-      return bytesRead;
+      if (bytesRead > length) {
+        // FileIOEngine can not read even key-value sizes into provided buffer
+        // length < bytesBuffer.length - offset
+        byte[] buf = new byte[bytesRead];
+        // repeat call
+        bytesRead = (int) dataPageGetRange(key, currentPageOffset, bytesToReadInPage, buf, 0);
+        if (bytesRead > length) {
+          throw new IOException(String.format("fatal: bytes read=%d requested=%d page offset=%d to read in page=%d\n",
+            bytesRead, length, currentPageOffset, bytesToReadInPage));
+        }
+        //Copy back to a provided buffer
+        // do not assume that item still exists - it can be deleted by GC in - between
+        // in this case -1 will be returned
+        if(bytesRead > 0) {
+          System.arraycopy(buf, 0, bytesBuffer, offset, bytesRead);
+        }
+      }
+      if (bytesRead > 0) {
+        this.stats.addTotalReadRequestsFromDataCache(1);
+        this.stats.addTotalBytesReadDataCache(bytesRead);
+        return bytesRead;
+      }
     }
-    // on local cache miss, read a  from external storage. This will always make
+    // on local cache miss, read from an external storage. This will always make
     // progress or throw an exception
-    // This is assumption that external buffer size == page size
+    // This is assumption that external buffer size == page size (???)
     int size = readExternalPage(position);
+    long fileOffset = position / pageSize * pageSize;
     if (size > 0) {
-      cache.put(key, 0, key.length, this.extBuffer, 0, size, 0L /* no expire */);
+      dataPagePut(key, 0, key.length, this.pageBuffer, 0, size, fileOffset);
       bytesToReadInPage = Math.min(bytesToReadInPage, size - currentPageOffset);
-      System.arraycopy(this.extBuffer, currentPageOffset, bytesBuffer, offset, bytesToReadInPage);
+      System.arraycopy(this.pageBuffer, currentPageOffset, bytesBuffer, offset, bytesToReadInPage);
       // Can be negative
       return bytesToReadInPage < 0? 0: bytesToReadInPage;
     }
     return 0;
   }
+  
+  /**
+   * Page range aligned with page size
+   * @param position start position
+   * @param len length of the range
+   * @return page range (multiples of pages covering the requested range)
+   */
+  private Range getPageRange(long position, int len) {
+    long start = position / this.pageSize * this.pageSize;
+    long end = (position + len) / this.pageSize * this.pageSize;
+    if (end < position + len) {
+      end += Math.min(this.pageSize, this.fileLength - end);
+    }
+    return new Range(start, end - start);
+  }
+  
+  /**
+   * Checks which pages from page range are in the cache
+   * @param r page range
+   * @return boolean array 
+   */
+  private boolean [] inCache(Range r) {
+    int n = (int) (r.size() / this.pageSize);
+    if (n * this.pageSize < r.size) {
+      n++;
+    }
+    long start = r.start / this.pageSize * this.pageSize;
+    if (start + n * this.pageSize < r.start + r.size) {
+      n++;
+    }
+    boolean[] res = new boolean[n];
+    long pos = r.start;
+    for (int i = 0; i < n; i++) {
+      byte[] key = getKey(this.baseKey, pos, this.pageSize);
+      res[i] =  dataPageExists(key); 
+      pos += this.pageSize;
+    }
+    return res;
+  }
+  
+  /**
+   * Checks which pages from page range are in the I/O buffer
+   * @param r page range
+   * @return boolean array 
+   */
+  private boolean[] inBuffer(Range r) {
+    int n = (int) (r.size() / this.pageSize);
+    if (n * this.pageSize < r.size) {
+      n += 1;
+    }
+    long start = r.start / this.pageSize * this.pageSize;
+    if (start + n * this.pageSize < r.start + r.size) {
+      n++;
+    }
+    boolean[] res = new boolean[n];
+    if (this.bufferEndOffset <= r.start || this.bufferStartOffset >= r.start + r.size) {
+      // no intersection
+      return res;
+    }
+    long pos = r.start;
+    for (int i = 0; i < n; i++) {
+      if (pos >= this.bufferStartOffset && pos < this.bufferEndOffset) {
+        res[i] = true;
+      }
+      pos += this.pageSize;
+    }
+    return res;
+  }
+  
+  private boolean[] union(boolean[] b1, boolean[] b2) {
+    boolean[] res = new boolean[b1.length];
+    for (int i = 0 ; i < b1.length; i++) {
+      res[i] = b1[i] || b2[i]; 
+    }
+    return res;
+  }
+  
+  /**
+   * B2 - B1
+   * @param b1 set
+   * @param b2 set
+   * @return set difference
+   */
+  private boolean[] diff(boolean[] b1, boolean[] b2) {
+    boolean[] res = new boolean[b1.length];
+    for (int i = 0 ; i < b1.length; i++) {
+      res[i] = !b1[i] && b2[i]; 
+    }
+    return res;
+  }
+  
+  /**
+   * Counts number of 'true' in boolean array
+   * @param b boolean array
+   * @return number of true elements
+   */
+  private int count(boolean[] b) {
+    int n = 0;
+    for (int i = 0; i < b.length; i++) {
+      n += b[i]? 1: 0;
+    }
+    return n;
+  }
+    
+  /******************************
+   * 
+   * Data cache API access
+   * @throws IOException 
+   *****************************/
+  
+  private long dataPageGetRange(byte[] key, int rangeStart, int rangeSize, byte[] buffer, int bufferOffset) 
+      throws IOException {
+    if (cache == null) {
+      return -1;
+    }
+    return cache.getRange(key, 0, key.length, rangeStart, rangeSize, true, buffer, bufferOffset);
+  }
+  
+  private boolean dataPageExists(byte[] key) {
+    if (cache == null) {
+      return false;
+    }
+    return cache.exists(key);
+  }
 
-  private int readInternal(byte[] bytesBuffer, int offset, int length,
+  private boolean dataPagePut(byte[] key, int keyOffset, int keySize, byte[] value, int valueOffset,
+      int valueSize, long fileOffset /* to detect scan */) throws IOException {
+    if (cache == null) {
+      return false;
+    }
+    if (this.sd != null) {
+      long curOffset = sd.current();
+      if (curOffset != fileOffset) {
+        scanDetected = sd.record(fileOffset);
+        if (scanDetected) {
+          // Disabling this until SD issue gets its resolution:
+          // https://github.com/VladRodionov/sidecar/issues/89
+          this.stats.addTotalScansDetected(1);
+          return false;
+        }
+      }
+    }
+    synchronized (this.getClass()) {
+      // TODO: use future putIfAbsent API
+      if (cache.exists(key, keyOffset, keySize)) {
+        // data pages in the cache are unique because of the key naming scheme:
+        // MD5(file-path + modification time + file offset)
+        // so if we have the same key we have the same data page
+        // no need to insert it
+        // This can happen when multiple clients access the same data file
+        // Exists API is cheap. Its less than 1 microsecond on average
+        return false;
+      }
+      // Put call is cheap as well - it stores data in in-memory buffer
+      // when memory buffer becomes full it is submitted asynchronously
+      // for file save operation
+      return cache.put(key, keyOffset, keySize, value, valueOffset, valueSize, 0L);
+    }
+  }
+
+  /*****************************/
+  
+  private int readFromPrefetchBuffer(byte[] bytesBuffer, int offset, int length,
+      long position) {
+    //hit or partially hit the in stream buffer
+    if (position >= this.bufferStartOffset && position < this.bufferEndOffset) {
+      int lengthToReadFromBuffer = (int) Math.min(length,
+          this.bufferEndOffset - position);
+      System.arraycopy(buffer, (int) (position - this.bufferStartOffset),
+          bytesBuffer, offset, lengthToReadFromBuffer);
+      this.stats.addTotalBytesReadPrefetch(lengthToReadFromBuffer);
+      this.stats.addTotalReadRequestsFromPrefetch(1);
+      return lengthToReadFromBuffer;
+    }
+    return -1;
+  }
+  
+  private void cacheDataFromPrefetchBuffer(Range pageRange) throws IOException {
+
+    for(long pos = pageRange.start; pos < pageRange.start + pageRange.size; pos+= pageSize) {
+      int size = (int) Math.min(pageSize, pageRange.start + pageRange.size - pos);
+      if (insidePrefetchBuffer(pos, size)) {
+        byte[] key = getKey(this.baseKey, pos, this.pageSize);
+        long fileOffset = pos / pageSize * pageSize;
+        if (!dataPageExists(key)) {
+          dataPagePut(key, 0, key.length, this.buffer, (int)(pos - this.bufferStartOffset), 
+            size, fileOffset);
+        }
+      }
+    }
+  }
+  
+  private boolean insidePrefetchBuffer(long pos, int size) {
+    return pos >= bufferStartOffset && (pos + size < bufferEndOffset);
+  }
+
+  private int readFromCache(byte[] bytesBuffer, int offset, int length, long position,
+      boolean isPositionedRead, Range pageRange, boolean[] in_cache) throws IOException {
+    boolean fullCache = count(in_cache) == in_cache.length;
+    if (fullCache) {
+      // Basically reads data from the cache, but in case if any page is missing it will be
+      // loaded from other sources (write cache or remote FS)
+      // this can happen sometimes (rarely)
+      return fullyReadFromCache(bytesBuffer, offset, length, position, isPositionedRead);
+    }
+    // Some pages (or all of them) are missing
+    boolean[] in_buffer = inBuffer(pageRange);
+    boolean[] union = union(in_cache, in_buffer);
+    fullCache = count(union) == union.length;
+    if (fullCache) {
+      // Rest pages are in the buffer - we have to cache them
+      boolean[] diff = diff(in_cache, in_buffer);
+      long pos = pageRange.start;
+      for (int i = 0; i < diff.length; i++) {
+        if (diff[i]) {
+          byte[] key = getKey(this.baseKey, pos, this.pageSize);
+          int size = (int) Math.min(this.pageSize, this.bufferEndOffset - pos);
+          long fileOffset = pos / pageSize * pageSize;
+          dataPagePut(key, 0, key.length, this.buffer, (int) (pos - this.bufferStartOffset), size,
+            fileOffset);
+        }
+        pos += this.pageSize;
+      }
+      // Now we have everything in the cache
+      // TODO: performance optimization
+      // double read/write
+      return fullyReadFromCache(bytesBuffer, offset, length, position, isPositionedRead);
+    }
+    return -1;
+  }
+  
+  private byte[] getBuffer(int size) {
+    byte[] buf = null;
+    if (this.buffer.length >= size) {
+      // Read ALL into I/O buffer
+      buf = this.buffer;
+    } else {
+      // Allocate new
+      buf = new byte[size];
+    }
+    return buf;
+  }
+  
+  /**
+   * Read internal
+   * @param bytesBuffer
+   * @param offset
+   * @param length
+   * @param position
+   * @param isPositionedRead
+   * @return
+   * @throws IOException
+   */
+  private int readInternal(byte[] bytesBuffer, int offset, int length, long position,
+      boolean isPositionedRead) throws IOException {
+
+    // Adjust length
+    // just in case
+    length = (int) Math.min(length, this.fileLength - position);
+    Range pageRange = getPageRange(position, length);
+    // Try prefetch buffer first
+    int read = readFromPrefetchBuffer(bytesBuffer, offset, length, position);
+    if (read > 0) {
+      cacheDataFromPrefetchBuffer(pageRange);
+      if (!isPositionedRead) {
+        this.position += read;
+      }
+      return read;
+    }
+    // Now try page cache
+    boolean[] in_cache = inCache(pageRange);
+    read =
+        readFromCache(bytesBuffer, offset, length, position, isPositionedRead, pageRange, in_cache);
+    if (read > 0) {
+      return read;
+    }
+    // Some pages are neither in the cache nor in the I/O buffer - read ALL from write cache FS
+    // or from remote FS
+    byte[] buf = getBuffer((int) pageRange.size);
+
+    // For positional reads we read only what is required
+    // For non-positional or if scan was detected we do prefetching ONLY if requested position
+    // greater than buffer end offset
+    int toRead = !isPositionedRead || scanDetected
+        ? (int) Math.min(buf.length, this.fileLength - pageRange.start)
+        : (int) Math.min(pageRange.size, this.fileLength - pageRange.start);
+
+    // TODO: handle prefetching in external sources
+    // We need 'length' of data, but can read more than that
+    // if read is not positioned - we can not advance position by 'toRead' bytes
+
+    // FIXME: this is efficiently positional reads
+    // in case of streaming access can be expensive
+    read = readFullyFromRemoteFS(pageRange.start, buf, 0, toRead, isPositionedRead, length);
+    // Save to the page cache
+    long pos = pageRange.start;
+    for (int i = 0; i < in_cache.length; i++) {
+      if (!in_cache[i]) {
+        byte[] key = getKey(this.baseKey, pos, this.pageSize);
+        int size = (int) Math.min(this.pageSize, this.fileLength - pos);
+        long fileOffset = pos / pageSize * pageSize;
+        dataPagePut(key, 0, key.length, buf, i * this.pageSize, size, fileOffset);
+      }
+      pos += this.pageSize;
+    }
+    // Adjust stream position if not positioned read
+    if (!isPositionedRead) {
+      this.position += length;
+    }
+    // Copy from buf to bytesBuffer
+    int off = (int) (position - pageRange.start);
+    System.arraycopy(buf, off, bytesBuffer, offset, length);
+    // Update I/O buffer range
+    if (buf == this.buffer) {
+      this.bufferStartOffset = pageRange.start;
+      this.bufferEndOffset = pageRange.start + toRead;
+    }
+    return length;
+  }
+  
+  /**
+   * This in fact reads from read cache
+   * @param bytesBuffer buffer to read data to
+   * @param offset offset in the buffer
+   * @param length number of bytes to read
+   * @param position start position
+   * @param isPositionedRead is positioned read
+   * @return number of bytes read
+   * @throws IOException
+   */
+  private int fullyReadFromCache(byte[] bytesBuffer, int offset, int length,
                            long position, boolean isPositionedRead) throws IOException {
-    Preconditions.checkArgument(length >= 0, "length should be non-negative");
-    Preconditions.checkArgument(offset >= 0, "offset should be non-negative");
-    Preconditions.checkArgument(position >= 0, "position should be non-negative");
+    // Most of the time this is a read from page cache
+    checkArgument(length >= 0, "length should be non-negative");
+    checkArgument(offset >= 0, "offset should be non-negative");
+    checkArgument(position >= 0, "position should be non-negative");
     
     if (length == 0) {
       return 0;
@@ -251,7 +830,7 @@ public class CarrotCachingInputStream extends InputStream
     long lengthToRead = Math.min(length, this.fileLength - position);
     int bytesRead = 0;
     while (totalBytesRead < lengthToRead) {
-      bytesRead = bufferedRead(bytesBuffer, offset + totalBytesRead,
+      bytesRead = readCachedPage(bytesBuffer, offset + totalBytesRead,
           (int) (lengthToRead - totalBytesRead), currentPosition);
       totalBytesRead += bytesRead;
       currentPosition += bytesRead;
@@ -259,10 +838,7 @@ public class CarrotCachingInputStream extends InputStream
         this.position = currentPosition;
       }
     }
-    // Update position of the external stream
-    if (!isPositionedRead) {
-      this.extInputStream.seek(this.position);
-    }
+
     if (totalBytesRead > length
         || (totalBytesRead < length && currentPosition < this.fileLength)) {
       throw new IOException(String.format("Invalid number of bytes read - "
@@ -272,182 +848,71 @@ public class CarrotCachingInputStream extends InputStream
     return totalBytesRead;
   }
 
-
-  @Override
-  public long skip(long n) {
-    checkIfClosed();
-    if (n <= 0) {
-      return 0;
+  private FSDataInputStream getRemoteStream() throws IOException {
+    try {
+      
+      if (this.remoteStream != null) {
+        return this.remoteStream;
+      }
+      this.remoteStream =  this.remoteStreamCallable.call();
+      return this.remoteStream;
+    } catch (Exception e) {
+      throw new IOException(e);
     }
-    long toSkip = Math.min(remaining(), n);
-    position += toSkip;
-    return toSkip;
   }
-
-  @Override
-  public void close() throws IOException {
-    if (closed) {
-      throw new IOException("Cannot close a closed stream");
-    }
-    extInputStream.close();
-    closed = true;
-    // release buffers
-    if (buffer != null) {
-      ioPool.offer(buffer);
-    }
-    if (extBuffer != null) {
-      pagePool.offer(extBuffer);
-    }
-    
-  }
-
-  public long remaining() {
-    return EOF ? 0 : this.fileLength - position;
-  }
-
-  public int positionedRead(long pos, byte[] b, int off, int len) throws IOException {
-    return readInternal(b, off, len,  pos, true);
-  }
-
-  @Override
-  public long getPos() {
-    return position;
-  }
-
-  @Override
-  public void seek(long pos) {
-    checkIfClosed();
-    Preconditions.checkArgument(pos >= 0, "Seek position is negative: %s", pos);
-    Preconditions
-        .checkArgument(pos <= this.fileLength,
-            "Seek position (%s) exceeds the length of the file (%s)", pos, this.fileLength);
-    if (pos == position) {
-      return;
-    }
-    if (pos < position) {
-      EOF = false;
-    }
-    position = pos;
-  }
-
   /**
    * Convenience method to ensure the stream is not closed.
    */
   private void checkIfClosed() {
-    Preconditions.checkState(!closed, "Cannot operate on a closed stream");
+    checkState(!closed, "Cannot operate on a closed stream");
   }
 
-  private synchronized int readExternalPage(long position)
+  private int readExternalPage(long position)
       throws IOException {
     long pageStart = position - (position % this.pageSize);
     int pageSize = (int) Math.min(this.pageSize, this.fileLength - pageStart);
-    byte[] page = this.extBuffer;
+    byte[] page = this.pageBuffer;
     int totalBytesRead = 0;
     while (totalBytesRead < pageSize) {
       int bytesRead;
-      bytesRead = extInputStream.read(pageStart + totalBytesRead, page, totalBytesRead, pageSize - totalBytesRead);
+      bytesRead = readFromRemoteFS(pageStart + totalBytesRead, page, totalBytesRead, pageSize - totalBytesRead);
       if (bytesRead <= 0) {
         break;
       }
       totalBytesRead += bytesRead;
     }
- 
     if (totalBytesRead != pageSize) {
       throw new IOException("Failed to read page from external storage. Bytes read: "
           + totalBytesRead + " Page size: " + pageSize);
     }
     return totalBytesRead;
   }
-
-  public int available() throws IOException {
-    if (this.closed) {
-      throw new IOException("Cannot query available bytes from a closed stream.");
+  
+  private int readFromRemoteFS(long position, byte[] buffer, int bufOffset, int len)
+      throws IOException {
+    FSDataInputStream is = getRemoteStream();
+    long start = System.nanoTime();
+    int read = is.read(position, buffer, bufOffset, len);
+    long end = System.nanoTime();
+    if (read > 0) {
+      this.stats.addTotalReadRequestsFromRemote(1);
+      this.stats.addTotalBytesReadRemote(read);
+      this.stats.addTotalRemoteFSReadTime(end - start);
     }
-    return (int) remaining();
-  }
-
-  private byte[] one = new byte[1];
-
-  @Override
-  public int read() throws IOException {
-    if (this.closed) {
-      throw new IOException("Cannot read from a closed stream");
-    }
-
-    int n = read(one, 0, 1);
-    if (n == -1) {
-      return n;
-    }
-    return one[0] & 0xff;
-  }
-
-  @Override
-  public int read(byte[] buffer) throws IOException {
-    return read(buffer, 0, buffer.length);
-  }
-
-  @Override
-  public int read(ByteBuffer buf) throws IOException {
-    if (this.closed) {
-      throw new IOException("Cannot read from a closed stream");
-    }
-    int bytesRead = read(buf, buf.position(), buf.remaining());
-    
-    return bytesRead;
-  }
-
-  @Override
-  public int read(long position, byte[] buffer, int offset, int length) throws IOException {
-    if (this.closed) {
-      throw new IOException("Cannot read from a closed stream");
-    }
-
-    int bytesRead = positionedRead(position, buffer, offset, length);
-    
-    return bytesRead;
-  }
-
-  @Override
-  public void readFully(long position, byte[] buffer) throws IOException {
-    readFully(position, buffer, 0, buffer.length);
-  }
-
-  @Override
-  public void readFully(long position, byte[] buffer, int offset, int length) throws IOException {
-    int totalBytesRead = 0;
-    while (totalBytesRead < length) {
-      int bytesRead =
-          read(position + totalBytesRead, buffer, offset + totalBytesRead, length - totalBytesRead);
-      if (bytesRead == -1) {
-        LOG.error("file length=%d position=%d totalBytesRead=%d to read=%d", 
-          fileLength, position, totalBytesRead, length - totalBytesRead);
-        throw new EOFException();
-      }
-      totalBytesRead += bytesRead;
-    }
-  }
-
-  /**
-   * This method is not supported in {@link CarrotCachingInputStream}.
-   *
-   * @param targetPos N/A
-   * @return N/A
-   * @throws IOException always
-   */
-  @Override
-  public boolean seekToNewSource(long targetPos) throws IOException {
-    throw new IOException("This method is not supported.");
+    return read;
   }
   
-  private byte[] getKey(long offset) {
-    int size = this.baseKey.length;
-    offset = offset / pageSize * pageSize;
-    for (int i = 0; i < Utils.SIZEOF_LONG; i++) {
-      int rem = (int) (offset % 256);
-      this.baseKey[size - i - 1] = (byte) rem;
-      offset /= 256;
-    }
-    return this.baseKey;
+  private int readFullyFromRemoteFS(long position, byte[] buffer, int bufOffset, 
+      int len, boolean isPositionedRead, int toAdvance)
+      throws IOException {
+    FSDataInputStream is = getRemoteStream();
+    long start = System.nanoTime();
+    is.readFully(position, buffer, bufOffset, len);
+    long end = System.nanoTime();
+    this.stats.addTotalReadRequestsFromRemote(1);
+    this.stats.addTotalBytesReadRemote(len);
+    this.stats.addTotalRemoteFSReadTime(end - start);
+    return len;
   }
   
 }

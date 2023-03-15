@@ -18,9 +18,7 @@ import com.facebook.presto.sql.planner.iterative.rule.test.BaseRuleTest;
 import com.facebook.presto.sql.planner.iterative.rule.test.RuleTester;
 import com.facebook.presto.sql.relational.FunctionResolution;
 import com.facebook.presto.sql.tree.ExistsPredicate;
-import com.facebook.presto.sql.tree.InPredicate;
 import com.facebook.presto.sql.tree.LongLiteral;
-import com.facebook.presto.sql.tree.SymbolReference;
 import com.facebook.presto.tpch.TpchConnectorFactory;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -46,6 +44,7 @@ import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.tableS
 import static com.facebook.presto.sql.planner.assertions.PlanMatchPattern.values;
 import static com.facebook.presto.sql.planner.iterative.rule.test.PlanBuilder.assignment;
 import static com.facebook.presto.sql.planner.plan.JoinNode.Type.INNER;
+import static com.facebook.presto.sql.relational.Expressions.inSubquery;
 import static java.util.Collections.emptyList;
 
 public class TestTransformUncorrelatedInPredicateSubqueryToDistinctInnerJoin
@@ -69,9 +68,7 @@ public class TestTransformUncorrelatedInPredicateSubqueryToDistinctInnerJoin
                 .on(p -> p.apply(
                         assignment(
                                 p.variable("x"),
-                                new InPredicate(
-                                        new SymbolReference("y"),
-                                        new SymbolReference("z"))),
+                                inSubquery(p.variable("y"), p.variable("z"))),
                         ImmutableList.of(p.variable("y")),
                         p.values(p.variable("y")),
                         p.values()))
@@ -97,9 +94,7 @@ public class TestTransformUncorrelatedInPredicateSubqueryToDistinctInnerJoin
                 .on(p -> p.apply(
                         assignment(
                                 p.variable("x"),
-                                new InPredicate(
-                                        new SymbolReference("y"),
-                                        new SymbolReference("z"))),
+                                inSubquery(p.variable("y"), p.variable("z"))),
                         emptyList(),
                         p.values(p.variable("y")),
                         p.values(p.variable("z"))))
@@ -119,9 +114,7 @@ public class TestTransformUncorrelatedInPredicateSubqueryToDistinctInnerJoin
                 .on(p -> p.apply(
                         assignment(
                                 p.variable("x"),
-                                new InPredicate(
-                                        new SymbolReference("y"),
-                                        new SymbolReference("z"))),
+                                inSubquery(p.variable("y"), p.variable("z"))),
                         emptyList(),
                         p.values(p.variable("y")),
                         p.values(p.variable("z")),
@@ -132,7 +125,7 @@ public class TestTransformUncorrelatedInPredicateSubqueryToDistinctInnerJoin
     @Test
     public void testSimpleSemijoins()
     {
-        tester().assertThat(ImmutableSet.of(new TransformUncorrelatedInPredicateSubqueryToDistinctInnerJoin()), new LogicalPropertiesProviderImpl(new FunctionResolution(getFunctionManager())))
+        tester().assertThat(ImmutableSet.of(new TransformUncorrelatedInPredicateSubqueryToDistinctInnerJoin()), new LogicalPropertiesProviderImpl(new FunctionResolution(getFunctionManager().getFunctionAndTypeResolver())))
                 .on("SELECT * FROM nation WHERE regionkey IN (SELECT regionkey FROM region)")
                 .matches(output(anyTree(
                         aggregation(
@@ -143,7 +136,7 @@ public class TestTransformUncorrelatedInPredicateSubqueryToDistinctInnerJoin
                                                 tableScan("nation", ImmutableMap.of("regionkey", "regionkey", "nationkey", "nationkey", "name", "name", "comment", "comment"))),
                                         tableScan("region", ImmutableMap.of("regionkey_1", "regionkey")))))));
 
-        tester().assertThat(ImmutableSet.of(new TransformUncorrelatedInPredicateSubqueryToDistinctInnerJoin()), new LogicalPropertiesProviderImpl(new FunctionResolution(getFunctionManager())))
+        tester().assertThat(ImmutableSet.of(new TransformUncorrelatedInPredicateSubqueryToDistinctInnerJoin()), new LogicalPropertiesProviderImpl(new FunctionResolution(getFunctionManager().getFunctionAndTypeResolver())))
                 .on("SELECT * FROM nation WHERE regionkey IN (SELECT regionkey FROM region) AND name IN (SELECT name FROM region)")
                 .matches(output(anyTree(
                         aggregation(
@@ -170,9 +163,7 @@ public class TestTransformUncorrelatedInPredicateSubqueryToDistinctInnerJoin
                 .on(p -> p.apply(
                         assignment(
                                 p.variable("x"),
-                                new InPredicate(
-                                        new SymbolReference("y"),
-                                        new SymbolReference("z"))),
+                                inSubquery(p.variable("y"), p.variable("z"))),
                         emptyList(),
                         p.values(p.variable("y")),
                         p.values(p.variable("z"))))
@@ -183,9 +174,7 @@ public class TestTransformUncorrelatedInPredicateSubqueryToDistinctInnerJoin
                 .on(p -> p.apply(
                         assignment(
                                 p.variable("x"),
-                                new InPredicate(
-                                        new SymbolReference("y"),
-                                        new SymbolReference("z"))),
+                                inSubquery(p.variable("y"), p.variable("z"))),
                         emptyList(),
                         p.values(p.variable("y")),
                         p.values(p.variable("z"))))
@@ -196,9 +185,7 @@ public class TestTransformUncorrelatedInPredicateSubqueryToDistinctInnerJoin
                 .on(p -> p.apply(
                         assignment(
                                 p.variable("x"),
-                                new InPredicate(
-                                        new SymbolReference("y"),
-                                        new SymbolReference("z"))),
+                                inSubquery(p.variable("y"), p.variable("z"))),
                         emptyList(),
                         p.values(p.variable("y")),
                         p.values(p.variable("z"))))

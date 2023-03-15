@@ -17,7 +17,6 @@ import com.facebook.presto.server.TaskUpdateRequest;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
-import java.util.Map;
 import java.util.Optional;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
@@ -26,18 +25,14 @@ import static java.util.Objects.requireNonNull;
 public class BatchTaskUpdateRequest
 {
     private final TaskUpdateRequest taskUpdateRequest;
-    // Map from plan node id to serialized ShuffleReadInfo
-    private final Optional<Map<String, byte[]>> shuffleReadInfos;
-    private final Optional<byte[]> shuffleWriteInfo;
+    private final Optional<String> shuffleWriteInfo;
 
     @JsonCreator
     public BatchTaskUpdateRequest(
             @JsonProperty("taskUpdateRequest") TaskUpdateRequest taskUpdateRequest,
-            @JsonProperty("shuffleReadInfos") Optional<Map<String, byte[]>> shuffleReadInfos,
-            @JsonProperty("shuffleWriteInfo") Optional<byte[]> shuffleWriteInfo)
+            @JsonProperty("shuffleWriteInfo") Optional<String> shuffleWriteInfo)
     {
         this.taskUpdateRequest = requireNonNull(taskUpdateRequest, "taskUpdateRequest is null");
-        this.shuffleReadInfos = requireNonNull(shuffleReadInfos, "shuffleReadInfos is null");
         this.shuffleWriteInfo = requireNonNull(shuffleWriteInfo, "shuffleWriteInfo is null");
     }
 
@@ -48,13 +43,7 @@ public class BatchTaskUpdateRequest
     }
 
     @JsonProperty
-    public Optional<Map<String, byte[]>> getShuffleReadInfos()
-    {
-        return shuffleReadInfos;
-    }
-
-    @JsonProperty
-    public Optional<byte[]> getShuffleWriteInfo()
+    public Optional<String> getShuffleWriteInfo()
     {
         return shuffleWriteInfo;
     }
@@ -64,7 +53,6 @@ public class BatchTaskUpdateRequest
     {
         return toStringHelper(this)
                 .add("taskUpdateRequest", taskUpdateRequest)
-                .add("shuffleReadInfos", shuffleReadInfos)
                 .add("shuffleWriteInfo", shuffleWriteInfo)
                 .toString();
     }

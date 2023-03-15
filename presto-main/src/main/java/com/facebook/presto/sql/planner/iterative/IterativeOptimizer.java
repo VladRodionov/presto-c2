@@ -24,12 +24,12 @@ import com.facebook.presto.cost.StatsProvider;
 import com.facebook.presto.matching.Match;
 import com.facebook.presto.matching.Matcher;
 import com.facebook.presto.spi.PrestoException;
+import com.facebook.presto.spi.VariableAllocator;
 import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.eventlistener.PlanOptimizerInformation;
 import com.facebook.presto.spi.plan.LogicalPropertiesProvider;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
-import com.facebook.presto.sql.planner.PlanVariableAllocator;
 import com.facebook.presto.sql.planner.RuleStatsRecorder;
 import com.facebook.presto.sql.planner.TypeProvider;
 import com.facebook.presto.sql.planner.optimizations.PlanOptimizer;
@@ -60,7 +60,6 @@ public class IterativeOptimizer
     private final List<PlanOptimizer> legacyRules;
     private final RuleIndex ruleIndex;
     private final Optional<LogicalPropertiesProvider> logicalPropertiesProvider;
-    private final Set<String> rulesTriggered;
 
     public IterativeOptimizer(RuleStatsRecorder stats, StatsCalculator statsCalculator, CostCalculator costCalculator, Set<Rule<?>> rules)
     {
@@ -87,18 +86,17 @@ public class IterativeOptimizer
                 .register(newRules)
                 .build();
         this.logicalPropertiesProvider = requireNonNull(logicalPropertiesProvider, "logicalPropertiesProvider is null");
-        this.rulesTriggered = new HashSet<>();
 
         stats.registerAll(newRules);
     }
 
     @Override
-    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, PlanVariableAllocator variableAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
+    public PlanNode optimize(PlanNode plan, Session session, TypeProvider types, VariableAllocator variableAllocator, PlanNodeIdAllocator idAllocator, WarningCollector warningCollector)
     {
         // only disable new rules if we have legacy rules to fall back to
         if (!SystemSessionProperties.isNewOptimizerEnabled(session) && !legacyRules.isEmpty()) {
             for (PlanOptimizer optimizer : legacyRules) {
-                plan = optimizer.optimize(plan, session, variableAllocator.getTypes(), variableAllocator, idAllocator, warningCollector);
+                plan = optimizer.optimize(plan, session, TypeProvider.viewOf(variableAllocator.getVariables()), variableAllocator, idAllocator, warningCollector);
             }
 
             return plan;
@@ -121,15 +119,15 @@ public class IterativeOptimizer
                 Optional.of(memo),
                 lookup,
                 session,
-                variableAllocator.getTypes());
+                TypeProvider.viewOf(variableAllocator.getVariables()));
         CostProvider costProvider = new CachingCostProvider(costCalculator, statsProvider, Optional.of(memo), session);
         Context context = new Context(memo, lookup, idAllocator, variableAllocator, System.nanoTime(), timeout.toMillis(), session, warningCollector, costProvider, statsProvider);
         boolean planChanged = exploreGroup(memo.getRootGroup(), context, matcher);
+        context.collectOptimizerInformation();
         if (!planChanged) {
             return plan;
         }
 
-        rulesTriggered.stream().forEach(x -> session.getOptimizerInformationCollector().addInformation(new PlanOptimizerInformation(x, true, Optional.empty())));
         return memo.extract();
     }
 
@@ -187,7 +185,7 @@ public class IterativeOptimizer
                         }
                     }
                     node = context.memo.replace(group, transformedNode, rule.getClass().getName());
-                    rulesTriggered.add(rule.getClass().getSimpleName());
+                    context.addRulesTriggered(rule.getClass().getSimpleName());
 
                     done = false;
                     progress = true;
@@ -259,7 +257,7 @@ public class IterativeOptimizer
             }
 
             @Override
-            public PlanVariableAllocator getVariableAllocator()
+            public VariableAllocator getVariableAllocator()
             {
                 return context.variableAllocator;
             }
@@ -307,19 +305,20 @@ public class IterativeOptimizer
         private final Memo memo;
         private final Lookup lookup;
         private final PlanNodeIdAllocator idAllocator;
-        private final PlanVariableAllocator variableAllocator;
+        private final VariableAllocator variableAllocator;
         private final long startTimeInNanos;
         private final long timeoutInMilliseconds;
         private final Session session;
         private final WarningCollector warningCollector;
         private final CostProvider costProvider;
         private final StatsProvider statsProvider;
+        private final Set<String> rulesTriggered;
 
         public Context(
                 Memo memo,
                 Lookup lookup,
                 PlanNodeIdAllocator idAllocator,
-                PlanVariableAllocator variableAllocator,
+                VariableAllocator variableAllocator,
                 long startTimeInNanos,
                 long timeoutInMilliseconds,
                 Session session,
@@ -339,6 +338,7 @@ public class IterativeOptimizer
             this.warningCollector = warningCollector;
             this.costProvider = costProvider;
             this.statsProvider = statsProvider;
+            this.rulesTriggered = new HashSet<>();
         }
 
         public void checkTimeoutNotExhausted()
@@ -346,6 +346,16 @@ public class IterativeOptimizer
             if ((NANOSECONDS.toMillis(System.nanoTime() - startTimeInNanos)) >= timeoutInMilliseconds) {
                 throw new PrestoException(OPTIMIZER_TIMEOUT, format("The optimizer exhausted the time limit of %d ms", timeoutInMilliseconds));
             }
+        }
+
+        public void addRulesTriggered(String rule)
+        {
+            rulesTriggered.add(rule);
+        }
+
+        public void collectOptimizerInformation()
+        {
+            rulesTriggered.forEach(x -> session.getOptimizerInformationCollector().addInformation(new PlanOptimizerInformation(x, true, Optional.empty())));
         }
     }
 }

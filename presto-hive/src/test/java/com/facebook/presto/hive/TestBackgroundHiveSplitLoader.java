@@ -21,6 +21,8 @@ import com.facebook.presto.hive.HiveColumnHandle.ColumnType;
 import com.facebook.presto.hive.authentication.NoHdfsAuthentication;
 import com.facebook.presto.hive.filesystem.ExtendedFileSystem;
 import com.facebook.presto.hive.metastore.Column;
+import com.facebook.presto.hive.metastore.Partition;
+import com.facebook.presto.hive.metastore.Storage;
 import com.facebook.presto.hive.metastore.StorageFormat;
 import com.facebook.presto.hive.metastore.Table;
 import com.facebook.presto.spi.ConnectorSession;
@@ -66,6 +68,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static com.facebook.airlift.concurrent.Threads.daemonThreadsNamed;
 import static com.facebook.presto.common.type.IntegerType.INTEGER;
@@ -73,12 +76,14 @@ import static com.facebook.presto.common.type.VarcharType.VARCHAR;
 import static com.facebook.presto.hive.BucketFunctionType.HIVE_COMPATIBLE;
 import static com.facebook.presto.hive.CacheQuotaScope.GLOBAL;
 import static com.facebook.presto.hive.HiveSessionProperties.getMaxInitialSplitSize;
+import static com.facebook.presto.hive.HiveStorageFormat.ORC;
 import static com.facebook.presto.hive.HiveTestUtils.SESSION;
 import static com.facebook.presto.hive.HiveType.HIVE_INT;
 import static com.facebook.presto.hive.HiveType.HIVE_STRING;
 import static com.facebook.presto.hive.HiveUtil.getRegularColumnHandles;
 import static com.facebook.presto.hive.StoragePartitionLoader.BucketSplitInfo.createBucketSplitInfo;
 import static com.facebook.presto.hive.metastore.PrestoTableType.MANAGED_TABLE;
+import static com.facebook.presto.hive.metastore.StorageFormat.fromHiveStorageFormat;
 import static com.facebook.presto.spi.connector.NotPartitionedPartitionHandle.NOT_PARTITIONED;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
@@ -109,8 +114,9 @@ public class TestBackgroundHiveSplitLoader
             locatedFileStatus(RETURNED_PATH, 0L),
             locatedFileStatus(FILTERED_PATH, 0L));
 
+    private static final String PARTITION_COLUMN_NAME = "partitionColumn";
     private static final List<Column> PARTITION_COLUMNS = ImmutableList.of(
-            new Column("partitionColumn", HIVE_INT, Optional.empty(), Optional.empty()));
+            new Column(PARTITION_COLUMN_NAME, HIVE_INT, Optional.empty(), Optional.empty()));
     private static final List<HiveColumnHandle> BUCKET_COLUMN_HANDLES = ImmutableList.of(
             new HiveColumnHandle("col1", HIVE_INT, INTEGER.getTypeSignature(), 0, ColumnType.REGULAR, Optional.empty(), Optional.empty()));
 
@@ -218,6 +224,60 @@ public class TestBackgroundHiveSplitLoader
     }
 
     @Test
+    public void testUnsupportedTableFormat()
+            throws Exception
+    {
+        StorageFormat storageFormat = StorageFormat.create("NonExistentSerde", "NonExistentInputFormat", "NonExistentOutputFormat");
+        Table unsupportedTable = table(PARTITION_COLUMNS, Optional.empty(), storageFormat);
+
+        String partitionId = PARTITION_COLUMN_NAME + "=Partition_Value";
+        List<HivePartitionMetadata> hivePartitionMetadatas =
+                ImmutableList.of(
+                        new HivePartitionMetadata(
+                                new HivePartition(unsupportedTable.getSchemaTableName(), partitionId, ImmutableMap.of()),
+                                Optional.of(orcPartition()),
+                                TableToPartitionMapping.empty(),
+                                Optional.empty(),
+                                ImmutableSet.of()));
+
+        BackgroundHiveSplitLoader backgroundHiveSplitLoader = backgroundHiveSplitLoader(
+                SESSION,
+                ImmutableList.of(locatedFileStatus(new Path(SAMPLE_PATH), getMaxInitialSplitSize(SESSION).toBytes())),
+                Optional.empty(),
+                Optional.empty(),
+                unsupportedTable,
+                Optional.empty(),
+                hivePartitionMetadatas);
+
+        HiveSplitSource hiveSplitSource = hiveSplitSource(backgroundHiveSplitLoader);
+        backgroundHiveSplitLoader.start(hiveSplitSource);
+
+        assertEquals(drainSplits(hiveSplitSource).size(), 1);
+    }
+
+    private static Partition orcPartition()
+    {
+        return new Partition(
+                "test_db",
+                "test_table",
+                PARTITION_COLUMNS.stream().map(x -> "Partition_Value").collect(Collectors.toList()),
+                new Storage(
+                        fromHiveStorageFormat(ORC),
+                        "location",
+                        Optional.empty(),
+                        true,
+                        ImmutableMap.of(),
+                        ImmutableMap.of()),
+                PARTITION_COLUMNS,
+                ImmutableMap.of(),
+                Optional.empty(),
+                false,
+                true,
+                0,
+                0);
+    }
+
+    @Test
     public void testCachingDirectoryLister()
             throws Exception
     {
@@ -307,10 +367,11 @@ public class TestBackgroundHiveSplitLoader
     {
         DataSize initialSplitSize = getMaxInitialSplitSize(SESSION);
 
-        Table.Builder builder = Table.builder(table(ImmutableList.of(), Optional.empty()));
-        builder.getStorageBuilder().setStorageFormat(
-                StorageFormat.create(LazySimpleSerDe.class.getName(), TestSplittableFailureInputFormat.class.getName(), TestSplittableFailureInputFormat.class.getName()));
-        Table table = builder.build();
+        StorageFormat splittableStorageFormat = StorageFormat.create(
+                LazySimpleSerDe.class.getName(),
+                TestSplittableFailureInputFormat.class.getName(),
+                TestSplittableFailureInputFormat.class.getName());
+        Table table = table(ImmutableList.of(), Optional.empty(), splittableStorageFormat);
 
         //  Exactly minimum split size, no isSplittable check
         BackgroundHiveSplitLoader backgroundHiveSplitLoader = backgroundHiveSplitLoader(
@@ -319,7 +380,8 @@ public class TestBackgroundHiveSplitLoader
                 Optional.empty(),
                 Optional.empty(),
                 table,
-                Optional.empty());
+                Optional.empty(),
+                samplePartitionMetadatas());
 
         HiveSplitSource hiveSplitSource = hiveSplitSource(backgroundHiveSplitLoader);
         backgroundHiveSplitLoader.start(hiveSplitSource);
@@ -333,7 +395,8 @@ public class TestBackgroundHiveSplitLoader
                 Optional.empty(),
                 Optional.empty(),
                 table,
-                Optional.empty());
+                Optional.empty(),
+                samplePartitionMetadatas());
 
         hiveSplitSource = hiveSplitSource(backgroundHiveSplitLoader);
         backgroundHiveSplitLoader.start(hiveSplitSource);
@@ -360,7 +423,6 @@ public class TestBackgroundHiveSplitLoader
 
         @Override
         public RecordReader<Void, Void> getRecordReader(InputSplit inputSplit, JobConf jobConf, Reporter reporter)
-                throws IOException
         {
             throw new UnsupportedOperationException();
         }
@@ -500,7 +562,7 @@ public class TestBackgroundHiveSplitLoader
                         new OrcFileWriterConfig(),
                         new ParquetFileWriterConfig(),
                         new CacheConfig()).getSessionProperties());
-        return backgroundHiveSplitLoader(connectorSession, files, pathDomain, hiveBucketFilter, table, bucketHandle);
+        return backgroundHiveSplitLoader(connectorSession, files, pathDomain, hiveBucketFilter, table, bucketHandle, samplePartitionMetadatas());
     }
 
     private static BackgroundHiveSplitLoader backgroundHiveSplitLoader(
@@ -509,17 +571,9 @@ public class TestBackgroundHiveSplitLoader
             Optional<Domain> pathDomain,
             Optional<HiveBucketFilter> hiveBucketFilter,
             Table table,
-            Optional<HiveBucketHandle> bucketHandle)
+            Optional<HiveBucketHandle> bucketHandle,
+            List<HivePartitionMetadata> hivePartitionMetadatas)
     {
-        List<HivePartitionMetadata> hivePartitionMetadatas =
-                ImmutableList.of(
-                        new HivePartitionMetadata(
-                                new HivePartition(new SchemaTableName("testSchema", "table_name")),
-                                Optional.empty(),
-                                TableToPartitionMapping.empty(),
-                                Optional.empty(),
-                                ImmutableSet.of()));
-
         return new BackgroundHiveSplitLoader(
                 table,
                 hivePartitionMetadatas,
@@ -536,16 +590,19 @@ public class TestBackgroundHiveSplitLoader
                 false);
     }
 
+    private static List<HivePartitionMetadata> samplePartitionMetadatas()
+    {
+        return ImmutableList.of(
+                        new HivePartitionMetadata(
+                                new HivePartition(new SchemaTableName("testSchema", "table_name")),
+                                Optional.empty(),
+                                TableToPartitionMapping.empty(),
+                                Optional.empty(),
+                                ImmutableSet.of()));
+    }
+
     private static BackgroundHiveSplitLoader backgroundHiveSplitLoader(List<LocatedFileStatus> files, DirectoryLister directoryLister, String fileStatusCacheTables)
     {
-        List<HivePartitionMetadata> hivePartitionMetadatas = ImmutableList.of(
-                new HivePartitionMetadata(
-                        new HivePartition(new SchemaTableName("testSchema", "table_name")),
-                        Optional.empty(),
-                        TableToPartitionMapping.empty(),
-                        Optional.empty(),
-                        ImmutableSet.of()));
-
         ConnectorSession connectorSession = new TestingConnectorSession(
                 new HiveSessionProperties(
                         new HiveClientConfig()
@@ -557,7 +614,7 @@ public class TestBackgroundHiveSplitLoader
 
         return new BackgroundHiveSplitLoader(
                 SIMPLE_TABLE,
-                hivePartitionMetadatas,
+                samplePartitionMetadatas(),
                 Optional.empty(),
                 createBucketSplitInfo(Optional.empty(), Optional.empty()),
                 connectorSession,
@@ -645,13 +702,23 @@ public class TestBackgroundHiveSplitLoader
             List<Column> partitionColumns,
             Optional<HiveBucketProperty> bucketProperty)
     {
+        return table(
+                partitionColumns,
+                bucketProperty,
+                StorageFormat.create(
+                        "com.facebook.hive.orc.OrcSerde",
+                        "org.apache.hadoop.hive.ql.io.RCFileInputFormat",
+                        "org.apache.hadoop.hive.ql.io.RCFileInputFormat"));
+    }
+
+    private static Table table(
+            List<Column> partitionColumns,
+            Optional<HiveBucketProperty> bucketProperty,
+            StorageFormat storageFormat)
+    {
         Table.Builder tableBuilder = Table.builder();
         tableBuilder.getStorageBuilder()
-                .setStorageFormat(
-                        StorageFormat.create(
-                                "com.facebook.hive.orc.OrcSerde",
-                                "org.apache.hadoop.hive.ql.io.RCFileInputFormat",
-                                "org.apache.hadoop.hive.ql.io.RCFileInputFormat"))
+                .setStorageFormat(storageFormat)
                 .setLocation("hdfs://VOL1:9000/db_name/table_name")
                 .setSkewed(false)
                 .setBucketProperty(bucketProperty);
@@ -681,7 +748,7 @@ public class TestBackgroundHiveSplitLoader
                 null,
                 null,
                 path,
-                new BlockLocation[] {new BlockLocation(new String[1], new String[] {"localhost"}, 0, fileSize)});
+                new BlockLocation[]{new BlockLocation(new String[1], new String[]{"localhost"}, 0, fileSize)});
     }
 
     private static LocatedFileStatus locatedFileStatusWithNoBlocks(Path path)
@@ -698,10 +765,10 @@ public class TestBackgroundHiveSplitLoader
                 null,
                 null,
                 path,
-                new BlockLocation[] {});
+                new BlockLocation[]{});
     }
 
-    private static class TestingHdfsEnvironment
+    public static class TestingHdfsEnvironment
             extends HdfsEnvironment
     {
         private final List<LocatedFileStatus> files;
@@ -765,14 +832,12 @@ public class TestBackgroundHiveSplitLoader
 
                 @Override
                 public boolean hasNext()
-                        throws IOException
                 {
                     return iterator.hasNext();
                 }
 
                 @Override
                 public LocatedFileStatus next()
-                        throws IOException
                 {
                     return iterator.next();
                 }

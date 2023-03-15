@@ -26,7 +26,6 @@ import com.facebook.presto.server.security.SecurityConfig;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.session.PropertyMetadata;
 import com.facebook.presto.spiller.NodeSpillConfig;
-import com.facebook.presto.sql.analyzer.AnalyzerType;
 import com.facebook.presto.sql.analyzer.FeaturesConfig;
 import com.facebook.presto.sql.analyzer.FeaturesConfig.AggregationIfToFilterRewriteStrategy;
 import com.facebook.presto.sql.analyzer.FeaturesConfig.AggregationPartitioningMergingStrategy;
@@ -132,6 +131,7 @@ public final class SystemSessionProperties
     public static final String SPILL_ENABLED = "spill_enabled";
     public static final String JOIN_SPILL_ENABLED = "join_spill_enabled";
     public static final String AGGREGATION_SPILL_ENABLED = "aggregation_spill_enabled";
+    public static final String TOPN_SPILL_ENABLED = "topn_spill_enabled";
     public static final String DISTINCT_AGGREGATION_SPILL_ENABLED = "distinct_aggregation_spill_enabled";
     public static final String DEDUP_BASED_DISTINCT_AGGREGATION_SPILL_ENABLED = "dedup_based_distinct_aggregation_spill_enabled";
     public static final String DISTINCT_AGGREGATION_LARGE_BLOCK_SPILL_ENABLED = "distinct_aggregation_large_block_spill_enabled";
@@ -140,6 +140,7 @@ public final class SystemSessionProperties
     public static final String WINDOW_SPILL_ENABLED = "window_spill_enabled";
     public static final String ORDER_BY_SPILL_ENABLED = "order_by_spill_enabled";
     public static final String AGGREGATION_OPERATOR_UNSPILL_MEMORY_LIMIT = "aggregation_operator_unspill_memory_limit";
+    public static final String TOPN_OPERATOR_UNSPILL_MEMORY_LIMIT = "topn_operator_unspill_memory_limit";
     public static final String QUERY_MAX_REVOCABLE_MEMORY_PER_NODE = "query_max_revocable_memory_per_node";
     public static final String TEMP_STORAGE_SPILLER_BUFFER_SIZE = "temp_storage_spiller_buffer_size";
     public static final String OPTIMIZE_DISTINCT_AGGREGATIONS = "optimize_mixed_distinct_aggregations";
@@ -213,6 +214,7 @@ public final class SystemSessionProperties
     public static final String SPOOLING_OUTPUT_BUFFER_ENABLED = "spooling_output_buffer_enabled";
     public static final String SPARK_ASSIGN_BUCKET_TO_PARTITION_FOR_PARTITIONED_TABLE_WRITE_ENABLED = "spark_assign_bucket_to_partition_for_partitioned_table_write_enabled";
     public static final String LOG_FORMATTED_QUERY_ENABLED = "log_formatted_query_enabled";
+    public static final String LOG_INVOKED_FUNCTION_NAMES_ENABLED = "log_invoked_function_names_enabled";
     public static final String QUERY_RETRY_LIMIT = "query_retry_limit";
     public static final String QUERY_RETRY_MAX_EXECUTION_TIME = "query_retry_max_execution_time";
     public static final String PARTIAL_RESULTS_ENABLED = "partial_results_enabled";
@@ -236,6 +238,7 @@ public final class SystemSessionProperties
     public static final String SEGMENTED_AGGREGATION_ENABLED = "segmented_aggregation_enabled";
     public static final String USE_HISTORY_BASED_PLAN_STATISTICS = "use_history_based_plan_statistics";
     public static final String TRACK_HISTORY_BASED_PLAN_STATISTICS = "track_history_based_plan_statistics";
+    public static final String USE_PERFECTLY_CONSISTENT_HISTORIES = "use_perfectly_consistent_histories";
     public static final String MAX_LEAF_NODES_IN_PLAN = "max_leaf_nodes_in_plan";
     public static final String LEAF_NODE_LIMIT_ENABLED = "leaf_node_limit_enabled";
     public static final String PUSH_REMOTE_EXCHANGE_THROUGH_GROUP_ID = "push_remote_exchange_through_group_id";
@@ -246,12 +249,14 @@ public final class SystemSessionProperties
     public static final String KEY_BASED_SAMPLING_ENABLED = "key_based_sampling_enabled";
     public static final String KEY_BASED_SAMPLING_PERCENTAGE = "key_based_sampling_percentage";
     public static final String KEY_BASED_SAMPLING_FUNCTION = "key_based_sampling_function";
-    public static final String HASH_BASED_DISTINCT_LIMIT_ENABLED = "hash_based_distinct_limit_enabled";
-    public static final String HASH_BASED_DISTINCT_LIMIT_THRESHOLD = "hash_based_distinct_limit_threshold";
     public static final String QUICK_DISTINCT_LIMIT_ENABLED = "quick_distinct_limit_enabled";
     public static final String OPTIMIZE_CONDITIONAL_AGGREGATION_ENABLED = "optimize_conditional_aggregation_enabled";
     public static final String ANALYZER_TYPE = "analyzer_type";
     public static final String REMOVE_REDUNDANT_DISTINCT_AGGREGATION_ENABLED = "remove_redundant_distinct_aggregation_enabled";
+    public static final String PREFILTER_FOR_GROUPBY_LIMIT = "prefilter_for_groupby_limit";
+    public static final String PREFILTER_FOR_GROUPBY_LIMIT_TIMEOUT_MS = "prefilter_for_groupby_limit_timeout_ms";
+    public static final String OPTIMIZE_JOIN_PROBE_FOR_EMPTY_BUILD_RUNTIME = "optimize_join_probe_for_empty_build_runtime";
+    public static final String USE_DEFAULTS_FOR_CORRELATED_AGGREGATION_PUSHDOWN_THROUGH_OUTER_JOINS = "use_defaults_for_correlated_aggregation_pushdown_through_outer_joins";
 
     // TODO: Native execution related session properties that are temporarily put here. They will be relocated in the future.
     public static final String NATIVE_SIMPLIFIED_EXPRESSION_EVALUATION_ENABLED = "simplified_expression_evaluation_enabled";
@@ -693,6 +698,11 @@ public final class SystemSessionProperties
                         featuresConfig.isAggregationSpillEnabled(),
                         false),
                 booleanProperty(
+                        TOPN_SPILL_ENABLED,
+                        "Enable topN spilling if spill_enabled",
+                        featuresConfig.isTopNSpillEnabled(),
+                        false),
+                booleanProperty(
                         DISTINCT_AGGREGATION_SPILL_ENABLED,
                         "Enable spill for distinct aggregations if spill_enabled and aggregation_spill_enabled",
                         featuresConfig.isDistinctAggregationSpillEnabled(),
@@ -737,6 +747,15 @@ public final class SystemSessionProperties
                         VARCHAR,
                         DataSize.class,
                         featuresConfig.getAggregationOperatorUnspillMemoryLimit(),
+                        false,
+                        value -> DataSize.valueOf((String) value),
+                        DataSize::toString),
+                new PropertyMetadata<>(
+                        TOPN_OPERATOR_UNSPILL_MEMORY_LIMIT,
+                        "How much memory can should be allocated per topN operator in unspilling process",
+                        VARCHAR,
+                        DataSize.class,
+                        featuresConfig.getTopNOperatorUnspillMemoryLimit(),
                         false,
                         value -> DataSize.valueOf((String) value),
                         DataSize::toString),
@@ -1173,6 +1192,11 @@ public final class SystemSessionProperties
                         "Log formatted prepared query instead of raw query when enabled",
                         featuresConfig.isLogFormattedQueryEnabled(),
                         false),
+                booleanProperty(
+                        LOG_INVOKED_FUNCTION_NAMES_ENABLED,
+                        "Log the names of the functions invoked by the query when enabled.",
+                        featuresConfig.isLogInvokedFunctionNamesEnabled(),
+                        false),
                 new PropertyMetadata<>(
                         QUERY_RETRY_LIMIT,
                         "Query retry limit due to communication failures",
@@ -1281,18 +1305,11 @@ public final class SystemSessionProperties
                         false,
                         value -> ResourceAwareSchedulingStrategy.valueOf(((String) value).toUpperCase()),
                         ResourceAwareSchedulingStrategy::name),
-                new PropertyMetadata<>(
+                stringProperty(
                         ANALYZER_TYPE,
-                        format("Analyzer type to use. Options are %s",
-                                Stream.of(AnalyzerType.values())
-                                        .map(AnalyzerType::name)
-                                        .collect(joining(","))),
-                        VARCHAR,
-                        AnalyzerType.class,
-                        featuresConfig.getAnalyzerType(),
-                        true,
-                        value -> AnalyzerType.valueOf(((String) value).toUpperCase()),
-                        AnalyzerType::name),
+                        "Analyzer type to use.",
+                        "BUILTIN",
+                        true),
                 booleanProperty(
                         HEAP_DUMP_ON_EXCEEDED_MEMORY_LIMIT_ENABLED,
                         "Trigger heap dump to `EXCEEDED_MEMORY_LIMIT_HEAP_DUMP_FILE_PATH` on exceeded memory limit exceptions",
@@ -1319,18 +1336,6 @@ public final class SystemSessionProperties
                         "key_sampling_percent",
                         false),
                 integerProperty(
-                        HASH_BASED_DISTINCT_LIMIT_THRESHOLD,
-                        "Threshold for doing hash based distinct",
-                        // 10k is a decent-sized limit that guarantees almost no collisions if the # distinct < 10k according to:
-                        //   https://stackoverflow.com/questions/22029012/probability-of-64bit-hash-code-collisions
-                        featuresConfig.getHashBasedDistinctLimitThreshold(),
-                        false),
-                booleanProperty(
-                        HASH_BASED_DISTINCT_LIMIT_ENABLED,
-                        "Hash based distinct limit enabled",
-                        featuresConfig.isHashBasedDistinctLimitEnabled(),
-                        false),
-                integerProperty(
                         MAX_STAGE_COUNT_FOR_EAGER_SCHEDULING,
                         "Maximum stage count to use eager scheduling when using the adaptive scheduling policy",
                         featuresConfig.getMaxStageCountForEagerScheduling(),
@@ -1354,6 +1359,11 @@ public final class SystemSessionProperties
                         TRACK_HISTORY_BASED_PLAN_STATISTICS,
                         "Track history based plan statistics service in query optimizer",
                         featuresConfig.isTrackHistoryBasedPlanStatistics(),
+                        false),
+                booleanProperty(
+                        USE_PERFECTLY_CONSISTENT_HISTORIES,
+                        "Use perfectly consistent histories for history based optimizations, even when parts of a query are re-ordered.",
+                        featuresConfig.isUsePerfectlyConsistentHistories(),
                         false),
                 new PropertyMetadata<>(
                         MAX_LEAF_NODES_IN_PLAN,
@@ -1432,6 +1442,26 @@ public final class SystemSessionProperties
                         PUSH_AGGREGATION_BELOW_JOIN_BYTE_REDUCTION_THRESHOLD,
                         "Byte reduction ratio threshold at which to disable pushdown of aggregation below inner join",
                         featuresConfig.getPushAggregationBelowJoinByteReductionThreshold(),
+                        false),
+                booleanProperty(
+                        PREFILTER_FOR_GROUPBY_LIMIT,
+                        "Prefilter aggregation source for queries that have aggregations on simple tables with filters",
+                        featuresConfig.isPrefilterForGroupbyLimit(),
+                        false),
+                integerProperty(
+                        PREFILTER_FOR_GROUPBY_LIMIT_TIMEOUT_MS,
+                        "Timeout for finding the LIMIT number of keys for group by",
+                        10000,
+                        false),
+                booleanProperty(
+                        OPTIMIZE_JOIN_PROBE_FOR_EMPTY_BUILD_RUNTIME,
+                        "Optimize join probe at runtime if build side is empty",
+                        featuresConfig.isOptimizeJoinProbeForEmptyBuildRuntimeEnabled(),
+                        false),
+                booleanProperty(
+                        USE_DEFAULTS_FOR_CORRELATED_AGGREGATION_PUSHDOWN_THROUGH_OUTER_JOINS,
+                        "Coalesce with defaults for correlated aggregations",
+                        featuresConfig.isUseDefaultsForCorrelatedAggregationPushdownThroughOuterJoins(),
                         false));
     }
 
@@ -1468,16 +1498,6 @@ public final class SystemSessionProperties
     public static String getKeyBasedSamplingFunction(Session session)
     {
         return session.getSystemProperty(KEY_BASED_SAMPLING_FUNCTION, String.class);
-    }
-
-    public static boolean isHashBasedDistinctLimitEnabled(Session session)
-    {
-        return session.getSystemProperty(HASH_BASED_DISTINCT_LIMIT_ENABLED, Boolean.class);
-    }
-
-    public static int getHashBasedDistinctLimitThreshold(Session session)
-    {
-        return session.getSystemProperty(HASH_BASED_DISTINCT_LIMIT_THRESHOLD, Integer.class);
     }
 
     public List<PropertyMetadata<?>> getSessionProperties()
@@ -1794,6 +1814,11 @@ public final class SystemSessionProperties
         return session.getSystemProperty(AGGREGATION_SPILL_ENABLED, Boolean.class) && isSpillEnabled(session);
     }
 
+    public static boolean isTopNSpillEnabled(Session session)
+    {
+        return session.getSystemProperty(TOPN_SPILL_ENABLED, Boolean.class) && isSpillEnabled(session);
+    }
+
     public static boolean isDistinctAggregationSpillEnabled(Session session)
     {
         return session.getSystemProperty(DISTINCT_AGGREGATION_SPILL_ENABLED, Boolean.class) && isAggregationSpillEnabled(session);
@@ -1834,6 +1859,13 @@ public final class SystemSessionProperties
         DataSize memoryLimitForMerge = session.getSystemProperty(AGGREGATION_OPERATOR_UNSPILL_MEMORY_LIMIT, DataSize.class);
         checkArgument(memoryLimitForMerge.toBytes() >= 0, "%s must be positive", AGGREGATION_OPERATOR_UNSPILL_MEMORY_LIMIT);
         return memoryLimitForMerge;
+    }
+
+    public static DataSize getTopNOperatorUnspillMemoryLimit(Session session)
+    {
+        DataSize unspillMemoryLimit = session.getSystemProperty(TOPN_OPERATOR_UNSPILL_MEMORY_LIMIT, DataSize.class);
+        checkArgument(unspillMemoryLimit.toBytes() >= 0, "%s must be positive", TOPN_OPERATOR_UNSPILL_MEMORY_LIMIT);
+        return unspillMemoryLimit;
     }
 
     public static DataSize getQueryMaxRevocableMemoryPerNode(Session session)
@@ -2228,6 +2260,11 @@ public final class SystemSessionProperties
         return session.getSystemProperty(LOG_FORMATTED_QUERY_ENABLED, Boolean.class);
     }
 
+    public static boolean isLogInvokedFunctionNamesEnabled(Session session)
+    {
+        return session.getSystemProperty(LOG_INVOKED_FUNCTION_NAMES_ENABLED, Boolean.class);
+    }
+
     public static int getQueryRetryLimit(Session session)
     {
         return session.getSystemProperty(QUERY_RETRY_LIMIT, Integer.class);
@@ -2323,9 +2360,9 @@ public final class SystemSessionProperties
         return session.getSystemProperty(RESOURCE_AWARE_SCHEDULING_STRATEGY, ResourceAwareSchedulingStrategy.class);
     }
 
-    public static AnalyzerType getAnalyzerType(Session session)
+    public static String getAnalyzerType(Session session)
     {
-        return session.getSystemProperty(ANALYZER_TYPE, AnalyzerType.class);
+        return session.getSystemProperty(ANALYZER_TYPE, String.class);
     }
 
     public static Boolean isHeapDumpOnExceededMemoryLimitEnabled(Session session)
@@ -2363,6 +2400,11 @@ public final class SystemSessionProperties
         return session.getSystemProperty(TRACK_HISTORY_BASED_PLAN_STATISTICS, Boolean.class);
     }
 
+    public static boolean usePerfectlyConsistentHistories(Session session)
+    {
+        return session.getSystemProperty(USE_PERFECTLY_CONSISTENT_HISTORIES, Boolean.class);
+    }
+
     public static boolean shouldPushRemoteExchangeThroughGroupId(Session session)
     {
         return session.getSystemProperty(PUSH_REMOTE_EXCHANGE_THROUGH_GROUP_ID, Boolean.class);
@@ -2393,6 +2435,11 @@ public final class SystemSessionProperties
         return session.getSystemProperty(REMOVE_REDUNDANT_DISTINCT_AGGREGATION_ENABLED, Boolean.class);
     }
 
+    public static boolean isPrefilterForGroupbyLimit(Session session)
+    {
+        return session.getSystemProperty(PREFILTER_FOR_GROUPBY_LIMIT, Boolean.class);
+    }
+
     public static boolean isInPredicatesAsInnerJoinsEnabled(Session session)
     {
         return session.getSystemProperty(IN_PREDICATES_AS_INNER_JOINS_ENABLED, Boolean.class);
@@ -2401,5 +2448,20 @@ public final class SystemSessionProperties
     public static double getPushAggregationBelowJoinByteReductionThreshold(Session session)
     {
         return session.getSystemProperty(PUSH_AGGREGATION_BELOW_JOIN_BYTE_REDUCTION_THRESHOLD, Double.class);
+    }
+
+    public static int getPrefilterForGroupbyLimitTimeoutMS(Session session)
+    {
+        return session.getSystemProperty(PREFILTER_FOR_GROUPBY_LIMIT_TIMEOUT_MS, Integer.class);
+    }
+
+    public static boolean isOptimizeJoinProbeForEmptyBuildRuntimeEnabled(Session session)
+    {
+        return session.getSystemProperty(OPTIMIZE_JOIN_PROBE_FOR_EMPTY_BUILD_RUNTIME, Boolean.class);
+    }
+
+    public static boolean useDefaultsForCorrelatedAggregationPushdownThroughOuterJoins(Session session)
+    {
+        return session.getSystemProperty(USE_DEFAULTS_FOR_CORRELATED_AGGREGATION_PUSHDOWN_THROUGH_OUTER_JOINS, Boolean.class);
     }
 }

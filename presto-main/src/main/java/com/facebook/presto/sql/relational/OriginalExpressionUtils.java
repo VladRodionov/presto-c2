@@ -22,6 +22,7 @@ import com.facebook.presto.sql.analyzer.ExpressionTreeUtils;
 import com.facebook.presto.sql.tree.Expression;
 import com.facebook.presto.sql.tree.SymbolReference;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -103,6 +104,12 @@ public final class OriginalExpressionUtils
         }
 
         @Override
+        public List<RowExpression> getChildren()
+        {
+            throw new UnsupportedOperationException("Children of OriginalExpression cannot be derived");
+        }
+
+        @Override
         public String toString()
         {
             return expression.toString();
@@ -130,7 +137,7 @@ public final class OriginalExpressionUtils
         @Override
         public <R, C> R accept(RowExpressionVisitor<R, C> visitor, C context)
         {
-            throw new UnsupportedOperationException("OriginalExpression cannot appear in a RowExpression tree");
+            throw new UnsupportedOperationException("OriginalExpression: " + expression + " cannot appear in a RowExpression tree");
         }
 
         @Override

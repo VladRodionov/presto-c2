@@ -25,15 +25,10 @@ using namespace facebook::presto;
 
 namespace {
 std::string getDataPath(const std::string& fileName) {
-  static const std::string kFbcode = "fbcode";
-
   std::string currentPath = fs::current_path().c_str();
-  if (boost::algorithm::ends_with(currentPath, kFbcode)) {
-    return currentPath.substr(0, currentPath.length() - kFbcode.length()) + "third-party/presto_cpp/presto_protocol/tests/data/" + fileName;
-  }
-
-  if (boost::algorithm::ends_with(currentPath, "fbsource")) {
-    return currentPath + "/third-party/presto_cpp/presto_protocol/tests/data/" +
+  if (boost::algorithm::ends_with(currentPath, "fbcode")) {
+    return currentPath +
+        "/github/presto-trunk/presto-native-execution/presto_cpp/presto_protocol/tests/data/" +
         fileName;
   }
 

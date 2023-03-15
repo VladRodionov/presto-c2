@@ -24,6 +24,17 @@ public class MapSqlFunctions
 {
     private MapSqlFunctions() {}
 
+    @SqlInvokedScalarFunction(value = "map_top_n", deterministic = true, calledOnNullInput = true)
+    @Description("Truncates map items. Keeps only the top N elements by value.")
+    @TypeParameter("K")
+    @TypeParameter("V")
+    @SqlParameters({@SqlParameter(name = "input", type = "map(K, V)"), @SqlParameter(name = "n", type = "bigint")})
+    @SqlType("map(K, V)")
+    public static String mapTopN()
+    {
+        return "RETURN IF(n < 0, fail('n must be greater than or equal to 0'), map_from_entries(slice(array_sort(map_entries(map_filter(input, (k, v) -> v is not null)), (x, y) -> IF(x[2] < y[2], 1, IF(x[2] = y[2], 0, -1))) || map_entries(map_filter(input, (k, v) -> v is null)), 1, n)))";
+    }
+
     @SqlInvokedScalarFunction(value = "map_top_n_keys", deterministic = true, calledOnNullInput = false)
     @Description("Returns the top N keys of the given map in descending order according to the natural ordering of its values.")
     @TypeParameter("K")
@@ -44,5 +55,38 @@ public class MapSqlFunctions
     public static String mapTopNKeysComparator()
     {
         return "RETURN IF(n < 0, fail('n must be greater than or equal to 0'), slice(reverse(array_sort(map_keys(input), f)), 1, n))";
+    }
+
+    @SqlInvokedScalarFunction(value = "map_top_n_values", deterministic = true, calledOnNullInput = false)
+    @Description("Returns the top N values of the given map in descending order according to the natural ordering of its values.")
+    @TypeParameter("K")
+    @TypeParameter("V")
+    @SqlParameters({@SqlParameter(name = "input", type = "map(K, V)"), @SqlParameter(name = "n", type = "bigint")})
+    @SqlType("array<V>")
+    public static String mapTopNValues()
+    {
+        return "RETURN IF(n < 0, fail('n must be greater than or equal to 0'), slice(array_sort_desc(map_values(input)), 1, n))";
+    }
+
+    @SqlInvokedScalarFunction(value = "map_top_n_values", deterministic = true, calledOnNullInput = true)
+    @Description("Returns the top N values of the given map sorted using the provided lambda comparator.")
+    @TypeParameter("K")
+    @TypeParameter("V")
+    @SqlParameters({@SqlParameter(name = "input", type = "map(K, V)"), @SqlParameter(name = "n", type = "bigint"), @SqlParameter(name = "f", type = "function(V, V, int)")})
+    @SqlType("array<V>")
+    public static String mapTopNValuesComparator()
+    {
+        return "RETURN IF(n < 0, fail('n must be greater than or equal to 0'), slice(reverse(array_sort(remove_nulls(map_values(input)), f)) || filter(map_values(input), x -> x is null), 1, n))";
+    }
+
+    @SqlInvokedScalarFunction(value = "map_remove_null_values", deterministic = true, calledOnNullInput = true)
+    @Description("Constructs a map by removing all the keys with null values.")
+    @TypeParameter("K")
+    @TypeParameter("V")
+    @SqlParameter(name = "input", type = "map(K, V)")
+    @SqlType("map(K, V)")
+    public static String mapRemoveNulls()
+    {
+        return "RETURN map_filter(input, (k, v) -> v is not null)";
     }
 }

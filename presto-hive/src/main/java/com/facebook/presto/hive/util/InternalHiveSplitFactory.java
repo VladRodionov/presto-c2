@@ -19,7 +19,7 @@ import com.facebook.presto.hive.HiveFileInfo;
 import com.facebook.presto.hive.HiveSplitPartitionInfo;
 import com.facebook.presto.hive.InternalHiveSplit;
 import com.facebook.presto.hive.InternalHiveSplit.InternalHiveBlock;
-import com.facebook.presto.hive.S3SelectPushdown;
+import com.facebook.presto.hive.s3select.S3SelectPushdown;
 import com.facebook.presto.spi.HostAddress;
 import com.facebook.presto.spi.schedule.NodeSelectionStrategy;
 import com.google.common.collect.ImmutableList;
@@ -40,6 +40,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 
+import static com.facebook.presto.hive.HiveUtil.isSelectSplittable;
 import static com.facebook.presto.hive.HiveUtil.isSplittable;
 import static com.facebook.presto.hive.util.CustomSplitConversionUtils.extractCustomSplitInfo;
 import static com.facebook.presto.spi.schedule.NodeSelectionStrategy.HARD_AFFINITY;
@@ -97,7 +98,9 @@ public class InternalHiveSplitFactory
     {
         splittable = splittable &&
                 fileInfo.getLength() > minimumTargetSplitSizeInBytes &&
-                isSplittable(inputFormat, fileSystem, fileInfo.getPath());
+                (s3SelectPushdownEnabled ?
+                        isSelectSplittable(inputFormat, fileInfo.getPath(), s3SelectPushdownEnabled) :
+                        isSplittable(inputFormat, fileSystem, fileInfo.getPath()));
         return createInternalHiveSplit(
                 fileInfo.getPath(),
                 fileInfo.getBlockLocations(),

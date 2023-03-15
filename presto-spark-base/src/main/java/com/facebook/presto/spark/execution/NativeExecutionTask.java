@@ -23,9 +23,8 @@ import com.facebook.presto.execution.TaskManagerConfig;
 import com.facebook.presto.execution.TaskSource;
 import com.facebook.presto.execution.buffer.OutputBuffers;
 import com.facebook.presto.execution.scheduler.TableWriteInfo;
-import com.facebook.presto.server.TaskUpdateRequest;
 import com.facebook.presto.server.smile.BaseResponse;
-import com.facebook.presto.spark.execution.http.PrestoSparkHttpWorkerClient;
+import com.facebook.presto.spark.execution.http.PrestoSparkHttpTaskClient;
 import com.facebook.presto.spi.page.SerializedPage;
 import com.facebook.presto.sql.planner.PlanFragment;
 import com.google.common.util.concurrent.FutureCallback;
@@ -61,8 +60,9 @@ public class NativeExecutionTask
     private final Session session;
     private final PlanFragment planFragment;
     private final OutputBuffers outputBuffers;
-    private final PrestoSparkHttpWorkerClient workerClient;
+    private final PrestoSparkHttpTaskClient workerClient;
     private final TableWriteInfo tableWriteInfo;
+    private final Optional<String> shuffleWriteInfo;
     private final List<TaskSource> sources;
     private final Executor executor;
     private final HttpNativeExecutionTaskInfoFetcher taskInfoFetcher;
@@ -76,21 +76,23 @@ public class NativeExecutionTask
             List<TaskSource> sources,
             HttpClient httpClient,
             TableWriteInfo tableWriteInfo,
+            Optional<String> shuffleWriteInfo,
             Executor executor,
             ScheduledExecutorService updateScheduledExecutor,
             JsonCodec<TaskInfo> taskInfoCodec,
             JsonCodec<PlanFragment> planFragmentCodec,
-            JsonCodec<TaskUpdateRequest> taskUpdateRequestCodec,
+            JsonCodec<BatchTaskUpdateRequest> taskUpdateRequestCodec,
             TaskManagerConfig taskManagerConfig)
     {
         this.session = requireNonNull(session, "session is null");
         this.planFragment = requireNonNull(planFragment, "planFragment is null");
         this.tableWriteInfo = requireNonNull(tableWriteInfo, "tableWriteInfo is null");
+        this.shuffleWriteInfo = requireNonNull(shuffleWriteInfo, "shuffleWriteInfo is null");
         this.sources = requireNonNull(sources, "sources is null");
         this.executor = requireNonNull(executor, "executor is null");
         this.outputBuffers = createInitialEmptyOutputBuffers(PARTITIONED);
         requireNonNull(taskManagerConfig, "taskManagerConfig is null");
-        this.workerClient = new PrestoSparkHttpWorkerClient(
+        this.workerClient = new PrestoSparkHttpTaskClient(
                 requireNonNull(httpClient, "httpClient is null"),
                 taskId,
                 location,
@@ -167,6 +169,7 @@ public class NativeExecutionTask
                         sources,
                         planFragment,
                         tableWriteInfo,
+                        shuffleWriteInfo,
                         session,
                         outputBuffers),
                 new UpdateResponseHandler(future),

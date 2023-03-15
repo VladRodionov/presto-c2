@@ -46,8 +46,7 @@ void onFinalFailure(
     std::shared_ptr<exec::ExchangeQueue> queue) {
   VLOG(1) << errorMessage;
 
-  std::lock_guard<std::mutex> l(queue->mutex());
-  queue->setErrorLocked(errorMessage);
+  queue->setError(errorMessage);
 }
 } // namespace
 
@@ -82,8 +81,7 @@ void PrestoExchangeSource::request() {
 
 void PrestoExchangeSource::doRequest() {
   if (closed_.load()) {
-    std::lock_guard<std::mutex> l(queue_->mutex());
-    queue_->setErrorLocked("PrestoExchangeSource closed");
+    queue_->setError("PrestoExchangeSource closed");
     return;
   }
   auto path = fmt::format("{}/{}", basePath_, sequence_);
@@ -157,35 +155,41 @@ void PrestoExchangeSource::processDataResponse(
     page = std::make_unique<exec::SerializedPage>(
         std::move(singleChain),
         pool_,
-        [mappedMemory = response->mappedMemory()](folly::IOBuf& iobuf) {
-          // Free the backed memory from MappedMemory on page dtor
+        [allocator = response->allocator()](folly::IOBuf& iobuf) {
+          // Free the backed memory from MemoryAllocator on page dtor
           folly::IOBuf* start = &iobuf;
           auto curr = start;
           do {
-            mappedMemory->freeBytes(curr->writableData(), curr->length());
+            allocator->freeBytes(curr->writableData(), curr->length());
             curr = curr->next();
           } while (curr != start);
         });
   }
 
   {
-    std::lock_guard<std::mutex> l(queue_->mutex());
-    if (page) {
-      VLOG(1) << "Enqueuing page for " << basePath_ << "/" << sequence_ << ": "
-              << page->size() << " bytes";
-      queue_->enqueue(std::move(page));
-    }
-    if (complete) {
-      VLOG(1) << "Enqueuing empty page for " << basePath_ << "/" << sequence_;
-      atEnd_ = true;
-      queue_->enqueue(nullptr);
-    }
+    std::vector<ContinuePromise> promises;
+    {
+      std::lock_guard<std::mutex> l(queue_->mutex());
+      if (page) {
+        VLOG(1) << "Enqueuing page for " << basePath_ << "/" << sequence_
+                << ": " << page->size() << " bytes";
+        queue_->enqueueLocked(std::move(page), promises);
+      }
+      if (complete) {
+        VLOG(1) << "Enqueuing empty page for " << basePath_ << "/" << sequence_;
+        atEnd_ = true;
+        queue_->enqueueLocked(nullptr, promises);
+      }
 
-    sequence_ = ackSequence;
+      sequence_ = ackSequence;
 
-    // Reset requestPending_ if the response is complete or have pages.
-    if (complete || !empty) {
-      requestPending_ = false;
+      // Reset requestPending_ if the response is complete or have pages.
+      if (complete || !empty) {
+        requestPending_ = false;
+      }
+    }
+    for (auto& promise : promises) {
+      promise.setValue();
     }
   }
 

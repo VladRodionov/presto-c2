@@ -21,15 +21,16 @@ import com.facebook.presto.common.type.Type;
 import com.facebook.presto.expressions.LogicalRowExpressions;
 import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.metadata.Metadata;
-import com.facebook.presto.security.AccessControl;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ColumnMetadata;
-import com.facebook.presto.spi.ConnectorMaterializedViewDefinition;
+import com.facebook.presto.spi.MaterializedViewDefinition;
 import com.facebook.presto.spi.MaterializedViewStatus;
 import com.facebook.presto.spi.TableHandle;
 import com.facebook.presto.spi.WarningCollector;
+import com.facebook.presto.spi.analyzer.MetadataResolver;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.facebook.presto.spi.relation.VariableReferenceExpression;
+import com.facebook.presto.spi.security.AccessControl;
 import com.facebook.presto.sql.MaterializedViewUtils;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.relational.FunctionResolution;
@@ -125,6 +126,7 @@ public class MaterializedViewQueryOptimizer
     private final AccessControl accessControl;
     private final RowExpressionDomainTranslator domainTranslator;
     private final LogicalRowExpressions logicalRowExpressions;
+    private final MetadataResolver metadataResolver;
 
     public MaterializedViewQueryOptimizer(
             Metadata metadata,
@@ -138,10 +140,11 @@ public class MaterializedViewQueryOptimizer
         this.sqlParser = requireNonNull(sqlParser, "sql parser is null");
         this.accessControl = requireNonNull(accessControl, "access control is null");
         this.domainTranslator = requireNonNull(domainTranslator, "row expression domain translator is null");
+        this.metadataResolver = requireNonNull(metadata.getMetadataResolver(session), "metadataResolver is null");
         FunctionAndTypeManager functionAndTypeManager = metadata.getFunctionAndTypeManager();
         logicalRowExpressions = new LogicalRowExpressions(
                 new RowExpressionDeterminismEvaluator(functionAndTypeManager),
-                new FunctionResolution(functionAndTypeManager),
+                new FunctionResolution(functionAndTypeManager.getFunctionAndTypeResolver()),
                 functionAndTypeManager);
     }
 
@@ -347,7 +350,7 @@ public class MaterializedViewQueryOptimizer
         // TODO: Refactor query optimization code https://github.com/prestodb/presto/issues/16759
 
         for (QualifiedObjectName materializedViewName : referencedMaterializedViews) {
-            QuerySpecification rewrittenQuerySpecification = getRewrittenQuerySpecification(metadata, materializedViewName, querySpecification);
+            QuerySpecification rewrittenQuerySpecification = getRewrittenQuerySpecification(materializedViewName, querySpecification);
             if (rewrittenQuerySpecification != querySpecification) {
                 return rewrittenQuerySpecification;
             }
@@ -355,9 +358,9 @@ public class MaterializedViewQueryOptimizer
         return querySpecification;
     }
 
-    private QuerySpecification getRewrittenQuerySpecification(Metadata metadata, QualifiedObjectName materializedViewName, QuerySpecification originalQuerySpecification)
+    private QuerySpecification getRewrittenQuerySpecification(QualifiedObjectName materializedViewName, QuerySpecification originalQuerySpecification)
     {
-        ConnectorMaterializedViewDefinition materializedViewDefinition = metadata.getMaterializedView(session, materializedViewName).orElseThrow(() ->
+        MaterializedViewDefinition materializedViewDefinition = metadataResolver.getMaterializedView(materializedViewName).orElseThrow(() ->
                 new IllegalStateException("Materialized view definition not present in metadata as expected."));
         Table materializedViewTable = new Table(QualifiedName.of(materializedViewDefinition.getTable()));
         Query materializedViewQuery = (Query) sqlParser.createStatement(materializedViewDefinition.getOriginalSql(), createParsingOptions(session));
@@ -495,7 +498,7 @@ public class MaterializedViewQueryOptimizer
                 RowExpression rewriteLogicExpression = and(baseQueryWhereCondition,
                         call(baseQueryWhereCondition.getSourceLocation(),
                                 "not",
-                                new FunctionResolution(metadata.getFunctionAndTypeManager()).notFunction(),
+                                new FunctionResolution(metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver()).notFunction(),
                                 materializedViewWhereCondition.getType(),
                                 materializedViewWhereCondition));
                 RowExpression disjunctiveNormalForm = logicalRowExpressions.convertToDisjunctiveNormalForm(rewriteLogicExpression);
@@ -756,7 +759,7 @@ public class MaterializedViewQueryOptimizer
                     coercedMaybe,
                     coercedExpressionAnalysis.getExpressionTypes(),
                     ImmutableMap.of(),
-                    metadata.getFunctionAndTypeManager(),
+                    metadata.getFunctionAndTypeManager().getFunctionAndTypeResolver(),
                     session);
         }
 
@@ -814,7 +817,7 @@ public class MaterializedViewQueryOptimizer
         {
             QualifiedObjectName baseTableName = createQualifiedObjectName(session, table, table.getName());
 
-            Optional<TableHandle> tableHandle = metadata.getTableHandle(session, baseTableName);
+            Optional<TableHandle> tableHandle = metadata.getMetadataResolver(session).getTableHandle(baseTableName);
             if (!tableHandle.isPresent()) {
                 throw new SemanticException(MISSING_TABLE, node, "Table does not exist");
             }
@@ -857,7 +860,7 @@ public class MaterializedViewQueryOptimizer
                 baseQueryDomain = MaterializedViewUtils.getDomainFromFilter(session, domainTranslator, rowExpression);
             }
 
-            return metadata.getMaterializedViewStatus(session, materializedViewName, baseQueryDomain);
+            return metadataResolver.getMaterializedViewStatus(materializedViewName, baseQueryDomain);
         }
     }
 }

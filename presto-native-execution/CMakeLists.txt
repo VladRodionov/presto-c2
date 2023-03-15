@@ -144,8 +144,8 @@ include_directories(SYSTEM ${FOLLY_INCLUDE_DIRS})
 
 find_package(Protobuf REQUIRED)
 
-find_path(OPT_OPENSSL_DIR NAMES opt/openssl)
-set(OPENSSL_ROOT_DIR "${OPT_OPENSSL_DIR}/opt/openssl")
+find_path(OPT_OPENSSL_DIR NAMES opt/openssl@1.1)
+set(OPENSSL_ROOT_DIR "${OPT_OPENSSL_DIR}/opt/openssl@1.1")
 find_package(OpenSSL REQUIRED)
 
 find_library(LIBSODIUM_LIBRARY NAMES sodium)
@@ -156,7 +156,8 @@ find_library(WANGLE wangle)
 
 find_library(RE2 re2)
 
-find_package(FBTHRIFT)
+find_package(wangle CONFIG)
+find_package(FBThrift)
 include_directories(SYSTEM ${FBTHRIFT_INCLUDE_DIR})
 
 set(PROXYGEN_LIBRARIES ${PROXYGEN_HTTP_SERVER} ${PROXYGEN} ${WANGLE} ${FIZZ})

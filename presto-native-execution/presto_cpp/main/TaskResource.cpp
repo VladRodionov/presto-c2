@@ -11,9 +11,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include "TaskResource.h"
+#include "presto_cpp/main/TaskResource.h"
 #include <presto_cpp/main/common/Exception.h>
 #include "presto_cpp/external/json/json.hpp"
+#include "presto_cpp/main/common/Configs.h"
 #include "presto_cpp/main/thrift/ProtocolToThrift.h"
 #include "presto_cpp/main/thrift/ThriftIO.h"
 #include "presto_cpp/main/thrift/gen-cpp2/PrestoThrift.h"
@@ -111,6 +112,15 @@ void TaskResource::registerUris(http::HttpServer& server) {
         return acknowledgeResults(message, pathMatch);
       });
 
+  // task/(.+)/batch must come before the /v1/task/(.+) as it's more specific
+  // otherwise all requests will be matched with /v1/task/(.+)
+  server.registerPost(
+      R"(/v1/task/(.+)/batch)",
+      [&](proxygen::HTTPMessage* message,
+          const std::vector<std::string>& pathMatch) {
+        return createOrUpdateBatchTask(message, pathMatch);
+      });
+
   server.registerPost(
       R"(/v1/task/(.+))",
       [&](proxygen::HTTPMessage* message,
@@ -165,7 +175,7 @@ proxygen::RequestHandler* TaskResource::abortResults(
     proxygen::HTTPMessage* /*message*/,
     const std::vector<std::string>& pathMatch) {
   protocol::TaskId taskId = pathMatch[1];
-  long bufferId = std::stol(pathMatch[2]);
+  long bufferId = folly::to<long>(pathMatch[2]);
   return new http::CallbackRequestHandler(
       [this, taskId, bufferId](
           proxygen::HTTPMessage* /*message*/,
@@ -185,8 +195,8 @@ proxygen::RequestHandler* TaskResource::acknowledgeResults(
     proxygen::HTTPMessage* /*message*/,
     const std::vector<std::string>& pathMatch) {
   protocol::TaskId taskId = pathMatch[1];
-  long bufferId = std::stol(pathMatch[2]);
-  long token = std::stol(pathMatch[3]);
+  long bufferId = folly::to<long>(pathMatch[2]);
+  long token = folly::to<long>(pathMatch[3]);
 
   return new http::CallbackRequestHandler(
       [this, taskId, bufferId, token](
@@ -195,6 +205,9 @@ proxygen::RequestHandler* TaskResource::acknowledgeResults(
           proxygen::ResponseHandler* downstream) {
         try {
           taskManager_.acknowledgeResults(taskId, bufferId, token);
+        } catch (const velox::VeloxException& e) {
+          sendErrorResponse(downstream, e.what());
+          return;
         } catch (const std::exception& e) {
           sendErrorResponse(downstream, e.what());
           return;
@@ -203,13 +216,18 @@ proxygen::RequestHandler* TaskResource::acknowledgeResults(
       });
 }
 
-proxygen::RequestHandler* TaskResource::createOrUpdateTask(
+proxygen::RequestHandler* TaskResource::createOrUpdateTaskImpl(
     proxygen::HTTPMessage* /*message*/,
-    const std::vector<std::string>& pathMatch) {
+    const std::vector<std::string>& pathMatch,
+    const std::function<void(
+        const protocol::TaskId&,
+        const std::string&,
+        protocol::TaskUpdateRequest&,
+        velox::core::PlanFragment&)>& parseFunc) {
   protocol::TaskId taskId = pathMatch[1];
 
   return new http::CallbackRequestHandler(
-      [this, taskId](
+      [this, taskId, parseFunc](
           proxygen::HTTPMessage* /*message*/,
           const std::vector<std::unique_ptr<folly::IOBuf>>& body,
           proxygen::ResponseHandler* downstream) {
@@ -222,17 +240,9 @@ proxygen::RequestHandler* TaskResource::createOrUpdateTask(
 
         std::unique_ptr<protocol::TaskInfo> taskInfo;
         try {
-          protocol::TaskUpdateRequest taskUpdateRequest =
-              json::parse(updateJson);
+          protocol::TaskUpdateRequest taskUpdateRequest;
           velox::core::PlanFragment planFragment;
-          if (taskUpdateRequest.fragment) {
-            auto fragment =
-                velox::encoding::Base64::decode(*taskUpdateRequest.fragment);
-            protocol::PlanFragment prestoPlan = json::parse(fragment);
-            VeloxQueryPlanConverter converter(pool_.get());
-            planFragment = converter.toVeloxQueryPlan(
-                prestoPlan, taskUpdateRequest.tableWriteInfo, taskId);
-          }
+          parseFunc(taskId, updateJson, taskUpdateRequest, planFragment);
           const auto& session = taskUpdateRequest.session;
           auto configs = std::unordered_map<std::string, std::string>(
               session.systemProperties.begin(), session.systemProperties.end());
@@ -277,6 +287,66 @@ proxygen::RequestHandler* TaskResource::createOrUpdateTask(
       });
 }
 
+proxygen::RequestHandler* TaskResource::createOrUpdateBatchTask(
+    proxygen::HTTPMessage* message,
+    const std::vector<std::string>& pathMatch) {
+  return createOrUpdateTaskImpl(
+      message,
+      pathMatch,
+      [this](
+          const protocol::TaskId& taskId,
+          const std::string& updateJson,
+          protocol::TaskUpdateRequest& taskUpdateRequest,
+          velox::core::PlanFragment& planFragment) {
+        protocol::BatchTaskUpdateRequest batchTaskUpdateRequest =
+            json::parse(updateJson);
+        taskUpdateRequest = batchTaskUpdateRequest.taskUpdateRequest;
+        if (taskUpdateRequest.fragment == nullptr) {
+          return;
+        }
+        std::shared_ptr<protocol::String> serializedShuffleWriteInfo =
+            batchTaskUpdateRequest.shuffleWriteInfo;
+        auto shuffleName = SystemConfig::instance()->shuffleName();
+        if (serializedShuffleWriteInfo) {
+          VELOX_USER_CHECK(
+              !shuffleName.empty(),
+              "Shuffle name not provided from 'shuffle.name' property in "
+              "config.properties");
+        }
+        auto fragment =
+            velox::encoding::Base64::decode(*taskUpdateRequest.fragment);
+        protocol::PlanFragment prestoPlan = json::parse(fragment);
+        VeloxBatchQueryPlanConverter converter(
+            shuffleName, std::move(serializedShuffleWriteInfo), pool_.get());
+        planFragment = converter.toVeloxQueryPlan(
+            prestoPlan, taskUpdateRequest.tableWriteInfo, taskId);
+      });
+}
+
+proxygen::RequestHandler* TaskResource::createOrUpdateTask(
+    proxygen::HTTPMessage* message,
+    const std::vector<std::string>& pathMatch) {
+  protocol::TaskId taskId = pathMatch[1];
+  return createOrUpdateTaskImpl(
+      message,
+      pathMatch,
+      [this](
+          const protocol::TaskId& taskId,
+          const std::string& updateJson,
+          protocol::TaskUpdateRequest& taskUpdateRequest,
+          velox::core::PlanFragment& planFragment) {
+        taskUpdateRequest = json::parse(updateJson);
+        if (taskUpdateRequest.fragment != nullptr) {
+          auto fragment =
+              velox::encoding::Base64::decode(*taskUpdateRequest.fragment);
+          protocol::PlanFragment prestoPlan = json::parse(fragment);
+          auto converter = VeloxInteractiveQueryPlanConverter(pool_.get());
+          planFragment = converter.toVeloxQueryPlan(
+              prestoPlan, taskUpdateRequest.tableWriteInfo, taskId);
+        }
+      });
+}
+
 proxygen::RequestHandler* TaskResource::deleteTask(
     proxygen::HTTPMessage* message,
     const std::vector<std::string>& pathMatch) {
@@ -295,6 +365,9 @@ proxygen::RequestHandler* TaskResource::deleteTask(
         std::unique_ptr<protocol::TaskInfo> taskInfo;
         try {
           taskInfo = taskManager_.deleteTask(taskId, abort);
+        } catch (const velox::VeloxException& e) {
+          sendErrorResponse(downstream, e.what());
+          return;
         } catch (const std::exception& e) {
           sendErrorResponse(downstream, e.what());
           return;
@@ -314,8 +387,8 @@ proxygen::RequestHandler* TaskResource::getResults(
     proxygen::HTTPMessage* message,
     const std::vector<std::string>& pathMatch) {
   protocol::TaskId taskId = pathMatch[1];
-  long bufferId = std::stol(pathMatch[2]);
-  long token = std::stol(pathMatch[3]);
+  long bufferId = folly::to<long>(pathMatch[2]);
+  long token = folly::to<long>(pathMatch[3]);
 
   auto& headers = message->getHeaders();
   auto maxSize = protocol::DataSize(
@@ -360,6 +433,13 @@ proxygen::RequestHandler* TaskResource::getResults(
                   .body(std::move(result->data))
                   .sendWithEOM();
             })
+            .thenError(
+                folly::tag_t<velox::VeloxException>{},
+                [downstream, handlerState](const velox::VeloxException& e) {
+                  if (!handlerState->requestExpired()) {
+                    sendErrorResponse(downstream, e.what());
+                  }
+                })
             .thenError(
                 folly::tag_t<std::exception>{},
                 [downstream, handlerState](const std::exception& e) {
@@ -407,6 +487,13 @@ proxygen::RequestHandler* TaskResource::getTaskStatus(
                 }
               })
               .thenError(
+                  folly::tag_t<velox::VeloxException>{},
+                  [downstream, handlerState](const velox::VeloxException& e) {
+                    if (!handlerState->requestExpired()) {
+                      sendErrorResponse(downstream, e.what());
+                    }
+                  })
+              .thenError(
                   folly::tag_t<std::exception>{},
                   [downstream, handlerState](const std::exception& e) {
                     if (!handlerState->requestExpired()) {
@@ -446,6 +533,13 @@ proxygen::RequestHandler* TaskResource::getTaskInfo(
                 }
               })
               .thenError(
+                  folly::tag_t<velox::VeloxException>{},
+                  [downstream, handlerState](const velox::VeloxException& e) {
+                    if (!handlerState->requestExpired()) {
+                      sendErrorResponse(downstream, e.what());
+                    }
+                  })
+              .thenError(
                   folly::tag_t<std::exception>{},
                   [downstream, handlerState](const std::exception& e) {
                     if (!handlerState->requestExpired()) {
@@ -472,6 +566,9 @@ proxygen::RequestHandler* TaskResource::removeRemoteSource(
           proxygen::ResponseHandler* downstream) {
         try {
           taskManager_.removeRemoteSource(taskId, remoteId);
+        } catch (const velox::VeloxException& e) {
+          sendErrorResponse(downstream, e.what());
+          return;
         } catch (const std::exception& e) {
           sendErrorResponse(downstream, e.what());
           return;

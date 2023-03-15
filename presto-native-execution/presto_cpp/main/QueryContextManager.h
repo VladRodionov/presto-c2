@@ -15,6 +15,7 @@
 
 #include <folly/Synchronized.h>
 #include <folly/executors/CPUThreadPoolExecutor.h>
+#include <folly/executors/IOThreadPoolExecutor.h>
 #include <list>
 #include <memory>
 #include <unordered_map>
@@ -25,6 +26,7 @@
 namespace facebook::presto {
 
 folly::CPUThreadPoolExecutor* driverCPUExecutor();
+folly::IOThreadPoolExecutor* spillExecutorPtr();
 
 class QueryContextCache {
  public:
@@ -127,8 +129,6 @@ class QueryContextManager {
 
   static constexpr const char* kQueryMaxMemoryPerNode =
       "query.max-memory-per-node";
-  static constexpr const char* kQueryMaxTotalMemoryPerNode =
-      "query.max-total-memory-per-node";
   static constexpr int64_t kDefaultMaxMemoryPerNode =
       std::numeric_limits<int64_t>::max();
 

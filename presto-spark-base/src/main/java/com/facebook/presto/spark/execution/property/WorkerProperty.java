@@ -19,27 +19,101 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
-import java.util.Properties;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static java.lang.String.format;
+import static java.util.Objects.requireNonNull;
 
 /**
- * A utility class that helps with properties and its materialization.
+ * The implementor of any new WorkerProperty is expected to provide three configuration classes (or their variants) as minimal requirements to run the native process.
+ * The variants of the new configuration classes need to extend these three as base class to provide any new configs or override existing configs. For example:
+ * <p>
+ * // new configuration variance
+ * public class InternalNativeExecutionNodeConfig
+ * extends NativeExecutionNodeConfig
+ * {
+ * private static final String SMC_SERVICE_INVENTORY_TIER = "smc-service-inventory.tier";
+ * <p>
+ * private String smcServiceInventoryTier = "dummy.tier";
+ *
+ * @Override public Map<String, String> getAllProperties()
+ * {
+ * ImmutableMap.Builder<String, String> builder = ImmutableMap.builder();
+ * return builder.putAll(super.getAllProperties())
+ * .put(SMC_SERVICE_INVENTORY_TIER, smcServiceInventoryTier)
+ * .build();
+ * }
+ * @Config(SMC_SERVICE_INVENTORY_TIER) public PrestoFacebookSparkNativeExecutionNodeConfig setSmcServiceInventoryTier(String smcServiceInventoryTier)
+ * {
+ * this.smcServiceInventoryTier = smcServiceInventoryTier;
+ * return this;
+ * }
+ * }
+ * <p>
+ * // New WorkerProperty with new InternalNativeExecutionNodeConfig
+ * public class InternalWorkerProperty
+ * extends WorkerProperty<NativeExecutionConnectorConfig, InternalNativeExecutionNodeConfig, NativeExecutionSystemConfig>
+ * {
+ * @Inject public InternalWorkerProperty(
+ * NativeExecutionSystemConfig systemConfig,
+ * NativeExecutionConnectorConfig connectorConfig,
+ * InternalNativeExecutionNodeConfig nodeConfig)
+ * {
+ * super(connectorConfig, nodeConfig, systemConfig);
+ * }
+ * }
  */
-public class WorkerProperty
+public class WorkerProperty<T1 extends NativeExecutionConnectorConfig, T2 extends NativeExecutionNodeConfig, T3 extends NativeExecutionSystemConfig>
 {
-    private WorkerProperty()
+    private final T1 connectorConfig;
+    private final T2 nodeConfig;
+    private final T3 systemConfig;
+
+    public WorkerProperty(
+            T1 connectorConfig,
+            T2 nodeConfig,
+            T3 systemConfig)
     {
+        this.systemConfig = requireNonNull(systemConfig, "systemConfig is null");
+        this.nodeConfig = requireNonNull(nodeConfig, "nodeConfig is null");
+        this.connectorConfig = requireNonNull(connectorConfig, "connectorConfig is null");
     }
 
-    public static void populateProperty(Map<String, String> properties, Path path)
+    public T1 getConnectorConfig()
+    {
+        return connectorConfig;
+    }
+
+    public T2 getNodeConfig()
+    {
+        return nodeConfig;
+    }
+
+    public T3 getSystemConfig()
+    {
+        return systemConfig;
+    }
+
+    public void populateAllProperties(Path systemConfigPath, Path nodeConfigPath, Path connectorConfigPath)
             throws IOException
     {
-        Properties workerProperties = new Properties();
-        workerProperties.putAll(properties);
+        populateProperty(systemConfig.getAllProperties(), systemConfigPath);
+        populateProperty(nodeConfig.getAllProperties(), nodeConfigPath);
+        populateProperty(connectorConfig.getAllProperties(), connectorConfigPath);
+    }
+
+    private void populateProperty(Map<String, String> properties, Path path)
+            throws IOException
+    {
         File file = new File(path.toString());
         file.getParentFile().mkdirs();
         try {
+            // We're not using Java's Properties here because colon is a reserved character in Properties but our configs contains colon in certain config values (e.g http://)
             FileWriter fileWriter = new FileWriter(file);
-            workerProperties.store(fileWriter, "");
+            for (Map.Entry<String, String> entry : properties.entrySet()) {
+                checkArgument(!entry.getKey().contains("="), format("Config key %s contains invalid character: =", entry.getKey()));
+                fileWriter.write(entry.getKey() + "=" + entry.getValue() + "\n");
+            }
             fileWriter.close();
         }
         catch (IOException e) {

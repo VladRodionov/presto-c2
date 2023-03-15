@@ -23,6 +23,9 @@
 #include "velox/vector/ComplexVector.h"
 #include "velox/vector/FlatVector.h"
 #include "presto_cpp/main/types/TypeSignatureTypeConverter.h"
+#include "presto_cpp/main/operators/PartitionAndSerialize.h"
+#include "presto_cpp/main/operators/ShuffleWrite.h"
+#include "presto_cpp/main/operators/ShuffleRead.h"
 // clang-format on
 
 #include <folly/container/F14Set.h>
@@ -114,27 +117,8 @@ connector::hive::LocationHandle::TableType toTableType(
       return connector::hive::LocationHandle::TableType::kNew;
     case protocol::TableType::EXISTING:
       return connector::hive::LocationHandle::TableType::kExisting;
-    case protocol::TableType::TEMPORARY:
-      return connector::hive::LocationHandle::TableType::kTemporary;
     default:
       VELOX_UNSUPPORTED("Unsupported table type: {}.", toJsonString(tableType));
-  }
-}
-
-connector::hive::LocationHandle::WriteMode toWriteMode(
-    protocol::WriteMode writeMode) {
-  switch (writeMode) {
-    case protocol::WriteMode::STAGE_AND_MOVE_TO_TARGET_DIRECTORY:
-      return connector::hive::LocationHandle::WriteMode::
-          kStageAndMoveToTargetDirectory;
-    case protocol::WriteMode::DIRECT_TO_TARGET_NEW_DIRECTORY:
-      return connector::hive::LocationHandle::WriteMode::
-          kDirectToTargetNewDirectory;
-    case protocol::WriteMode::DIRECT_TO_TARGET_EXISTING_DIRECTORY:
-      return connector::hive::LocationHandle::WriteMode::
-          kDirectToTargetExistingDirectory;
-    default:
-      VELOX_UNSUPPORTED("Unsupported write mode: {}.", toJsonString(writeMode));
   }
 }
 
@@ -143,8 +127,7 @@ std::shared_ptr<connector::hive::LocationHandle> toLocationHandle(
   return std::make_shared<connector::hive::LocationHandle>(
       locationHandle.targetPath,
       locationHandle.writePath,
-      toTableType(locationHandle.tableType),
-      toWriteMode(locationHandle.writeMode));
+      toTableType(locationHandle.tableType));
 }
 
 int64_t toInt64(
@@ -176,6 +159,14 @@ std::unique_ptr<common::BigintRange> bigintRangeToFilter(
     high--;
   }
   return std::make_unique<common::BigintRange>(low, high, nullAllowed);
+}
+
+int64_t dateToInt64(
+    const std::shared_ptr<protocol::Block>& block,
+    const VeloxExprConverter& exprConverter,
+    const TypePtr& type) {
+  auto value = exprConverter.getConstantValue(type, *block);
+  return value.value<Date>().days();
 }
 
 double toDouble(
@@ -361,6 +352,30 @@ std::unique_ptr<common::BytesRange> varcharRangeToFilter(
       nullAllowed);
 }
 
+std::unique_ptr<common::BigintRange> dateRangeToFilter(
+    const protocol::Range& range,
+    bool nullAllowed,
+    const VeloxExprConverter& exprConverter,
+    const TypePtr& type) {
+  bool lowUnbounded = range.low.valueBlock == nullptr;
+  auto low = lowUnbounded
+      ? std::numeric_limits<int32_t>::min()
+      : dateToInt64(range.low.valueBlock, exprConverter, type);
+  if (!lowUnbounded && range.low.bound == protocol::Bound::ABOVE) {
+    low++;
+  }
+
+  bool highUnbounded = range.high.valueBlock == nullptr;
+  auto high = highUnbounded
+      ? std::numeric_limits<int32_t>::max()
+      : dateToInt64(range.high.valueBlock, exprConverter, type);
+  if (!highUnbounded && range.high.bound == protocol::Bound::BELOW) {
+    high--;
+  }
+
+  return std::make_unique<common::BigintRange>(low, high, nullAllowed);
+}
+
 std::unique_ptr<common::Filter> combineIntegerRanges(
     std::vector<std::unique_ptr<common::BigintRange>>& bigintFilters,
     bool nullAllowed) {
@@ -525,6 +540,8 @@ std::unique_ptr<common::Filter> toFilter(
       return boolRangeToFilter(range, nullAllowed, exprConverter, type);
     case TypeKind::REAL:
       return floatRangeToFilter(range, nullAllowed, exprConverter, type);
+    case TypeKind::DATE:
+      return dateRangeToFilter(range, nullAllowed, exprConverter, type);
     default:
       VELOX_UNSUPPORTED("Unsupported range type: {}", type->toString());
   }
@@ -534,79 +551,101 @@ std::unique_ptr<common::Filter> toFilter(
     const protocol::Domain& domain,
     const VeloxExprConverter& exprConverter) {
   auto nullAllowed = domain.nullAllowed;
-  auto sortedRangeSet =
-      std::dynamic_pointer_cast<protocol::SortedRangeSet>(domain.values);
-  VELOX_CHECK(sortedRangeSet, "Unsupported ValueSet type");
-  auto type = stringToType(sortedRangeSet->type);
-  auto ranges = sortedRangeSet->ranges;
+  if (auto sortedRangeSet =
+          std::dynamic_pointer_cast<protocol::SortedRangeSet>(domain.values)) {
+    auto type = stringToType(sortedRangeSet->type);
+    auto ranges = sortedRangeSet->ranges;
 
-  if (ranges.empty()) {
-    VELOX_CHECK(nullAllowed, "Unexpected always-false filter");
-    return std::make_unique<common::IsNull>();
-  }
-
-  if (ranges.size() == 1) {
-    // 'is not null' arrives as unbounded range with 'nulls not allowed'.
-    // We catch this case and create 'is not null' filter instead of the range
-    // filter.
-    const auto& range = ranges[0];
-    bool lowExclusive = range.low.bound == protocol::Bound::ABOVE;
-    bool lowUnbounded = range.low.valueBlock == nullptr && lowExclusive;
-    bool highExclusive = range.high.bound == protocol::Bound::BELOW;
-    bool highUnbounded = range.high.valueBlock == nullptr && highExclusive;
-    if (lowUnbounded && highUnbounded && !nullAllowed) {
-      return std::make_unique<common::IsNotNull>();
+    if (ranges.empty()) {
+      VELOX_CHECK(nullAllowed, "Unexpected always-false filter");
+      return std::make_unique<common::IsNull>();
     }
 
-    return toFilter(type, ranges[0], nullAllowed, exprConverter);
-  }
-
-  if (type->kind() == TypeKind::BIGINT || type->kind() == TypeKind::INTEGER ||
-      type->kind() == TypeKind::SMALLINT || type->kind() == TypeKind::TINYINT) {
-    std::vector<std::unique_ptr<common::BigintRange>> bigintFilters;
-    bigintFilters.reserve(ranges.size());
-    for (const auto& range : ranges) {
-      bigintFilters.emplace_back(
-          bigintRangeToFilter(range, nullAllowed, exprConverter, type));
-    }
-    return combineIntegerRanges(bigintFilters, nullAllowed);
-  }
-
-  if (type->kind() == TypeKind::VARCHAR) {
-    std::vector<std::unique_ptr<common::BytesRange>> bytesFilters;
-    bytesFilters.reserve(ranges.size());
-    for (const auto& range : ranges) {
-      bytesFilters.emplace_back(
-          varcharRangeToFilter(range, nullAllowed, exprConverter, type));
-    }
-    return combineBytesRanges(bytesFilters, nullAllowed);
-  }
-
-  if (type->kind() == TypeKind::BOOLEAN) {
-    VELOX_CHECK_EQ(ranges.size(), 2, "Multi bool ranges size can only be 2.");
-    std::unique_ptr<common::Filter> boolFilter;
-    for (const auto& range : ranges) {
-      auto filter = boolRangeToFilter(range, nullAllowed, exprConverter, type);
-      if (filter->kind() == common::FilterKind::kAlwaysFalse or
-          filter->kind() == common::FilterKind::kIsNull) {
-        continue;
+    if (ranges.size() == 1) {
+      // 'is not null' arrives as unbounded range with 'nulls not allowed'.
+      // We catch this case and create 'is not null' filter instead of the range
+      // filter.
+      const auto& range = ranges[0];
+      bool lowExclusive = range.low.bound == protocol::Bound::ABOVE;
+      bool lowUnbounded = range.low.valueBlock == nullptr && lowExclusive;
+      bool highExclusive = range.high.bound == protocol::Bound::BELOW;
+      bool highUnbounded = range.high.valueBlock == nullptr && highExclusive;
+      if (lowUnbounded && highUnbounded && !nullAllowed) {
+        return std::make_unique<common::IsNotNull>();
       }
-      VELOX_CHECK_NULL(boolFilter);
-      boolFilter = std::move(filter);
+
+      return toFilter(type, ranges[0], nullAllowed, exprConverter);
     }
 
-    VELOX_CHECK_NOT_NULL(boolFilter);
-    return boolFilter;
-  }
+    if (type->kind() == TypeKind::BIGINT || type->kind() == TypeKind::INTEGER ||
+        type->kind() == TypeKind::SMALLINT ||
+        type->kind() == TypeKind::TINYINT) {
+      std::vector<std::unique_ptr<common::BigintRange>> bigintFilters;
+      bigintFilters.reserve(ranges.size());
+      for (const auto& range : ranges) {
+        bigintFilters.emplace_back(
+            bigintRangeToFilter(range, nullAllowed, exprConverter, type));
+      }
+      return combineIntegerRanges(bigintFilters, nullAllowed);
+    }
 
-  std::vector<std::unique_ptr<common::Filter>> filters;
-  filters.reserve(ranges.size());
-  for (const auto& range : ranges) {
-    filters.emplace_back(toFilter(type, range, nullAllowed, exprConverter));
-  }
+    if (type->kind() == TypeKind::VARCHAR) {
+      std::vector<std::unique_ptr<common::BytesRange>> bytesFilters;
+      bytesFilters.reserve(ranges.size());
+      for (const auto& range : ranges) {
+        bytesFilters.emplace_back(
+            varcharRangeToFilter(range, nullAllowed, exprConverter, type));
+      }
+      return combineBytesRanges(bytesFilters, nullAllowed);
+    }
 
-  return std::make_unique<common::MultiRange>(
-      std::move(filters), nullAllowed, false);
+    if (type->kind() == TypeKind::BOOLEAN) {
+      VELOX_CHECK_EQ(ranges.size(), 2, "Multi bool ranges size can only be 2.");
+      std::unique_ptr<common::Filter> boolFilter;
+      for (const auto& range : ranges) {
+        auto filter =
+            boolRangeToFilter(range, nullAllowed, exprConverter, type);
+        if (filter->kind() == common::FilterKind::kAlwaysFalse or
+            filter->kind() == common::FilterKind::kIsNull) {
+          continue;
+        }
+        VELOX_CHECK_NULL(boolFilter);
+        boolFilter = std::move(filter);
+      }
+
+      VELOX_CHECK_NOT_NULL(boolFilter);
+      return boolFilter;
+    }
+
+    std::vector<std::unique_ptr<common::Filter>> filters;
+    filters.reserve(ranges.size());
+    for (const auto& range : ranges) {
+      filters.emplace_back(toFilter(type, range, nullAllowed, exprConverter));
+    }
+
+    return std::make_unique<common::MultiRange>(
+        std::move(filters), nullAllowed, false);
+  } else if (
+      auto equatableValueSet =
+          std::dynamic_pointer_cast<protocol::EquatableValueSet>(
+              domain.values)) {
+    if (equatableValueSet->entries.empty()) {
+      if (nullAllowed) {
+        return std::make_unique<common::IsNull>();
+      } else {
+        return std::make_unique<common::IsNotNull>();
+      }
+    }
+    VELOX_UNSUPPORTED(
+        "EquatableValueSet (with non-empty entries) to Velox filter conversion is not supported yet.");
+  } else if (
+      auto allOrNoneValueSet =
+          std::dynamic_pointer_cast<protocol::AllOrNoneValueSet>(
+              domain.values)) {
+    VELOX_UNSUPPORTED(
+        "AllOrNoneValueSet to Velox filter conversion is not supported yet.");
+  }
+  VELOX_UNSUPPORTED("Unsupported filter found.");
 }
 
 std::shared_ptr<connector::ConnectorTableHandle> toConnectorTableHandle(
@@ -931,7 +970,7 @@ core::LocalPartitionNode::Type toLocalExchangeType(
 }
 } // namespace
 
-core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
+core::PlanNodePtr VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::ExchangeNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1097,7 +1136,7 @@ std::shared_ptr<const protocol::ProjectNode> isIdentityProjection(
 }
 } // namespace
 
-core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
+core::PlanNodePtr VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::FilterNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1120,7 +1159,7 @@ core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
       joinType = core::JoinType::kLeftSemiFilter;
     } else if (auto notCall = isNot(node->predicate)) {
       if (equal(notCall->arguments[0], semiJoin->semiJoinOutput)) {
-        joinType = core::JoinType::kNullAwareAnti;
+        joinType = core::JoinType::kAnti;
       }
     }
 
@@ -1149,6 +1188,7 @@ core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
           std::make_shared<core::HashJoinNode>(
               semiJoin->id,
               core::JoinType::kLeftSemiProject,
+              false,
               leftKeys,
               rightKeys,
               nullptr, // filter
@@ -1166,7 +1206,7 @@ core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
     const bool constantValue =
         joinType.value() == core::JoinType::kLeftSemiFilter;
     projections.emplace_back(
-        std::make_shared<core::ConstantTypedExpr>(constantValue));
+        std::make_shared<core::ConstantTypedExpr>(BOOLEAN(), constantValue));
 
     return std::make_shared<core::ProjectNode>(
         node->id,
@@ -1175,6 +1215,7 @@ core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
         std::make_shared<core::HashJoinNode>(
             semiJoin->id,
             joinType.value(),
+            joinType == core::JoinType::kAnti ? true : false,
             leftKeys,
             rightKeys,
             nullptr, // filter
@@ -1189,18 +1230,8 @@ core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
       toVeloxQueryPlan(node->source, tableWriteInfo, taskId));
 }
 
-core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
-    const std::shared_ptr<const protocol::OutputNode>& node,
-    const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
-    const protocol::TaskId& taskId) {
-  return core::PartitionedOutputNode::single(
-      node->id,
-      toRowType(node->outputVariables),
-      toVeloxQueryPlan(node->source, tableWriteInfo, taskId));
-}
-
 std::shared_ptr<const core::ProjectNode>
-VeloxQueryPlanConverter::tryConvertOffsetLimit(
+VeloxQueryPlanConverterBase::tryConvertOffsetLimit(
     const std::shared_ptr<const protocol::ProjectNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1296,7 +1327,7 @@ VeloxQueryPlanConverter::tryConvertOffsetLimit(
 }
 
 std::shared_ptr<const core::ProjectNode>
-VeloxQueryPlanConverter::toVeloxQueryPlan(
+VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::ProjectNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1312,7 +1343,7 @@ VeloxQueryPlanConverter::toVeloxQueryPlan(
 }
 
 std::shared_ptr<const core::ValuesNode>
-VeloxQueryPlanConverter::toVeloxQueryPlan(
+VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::ValuesNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& /* tableWriteInfo */,
     const protocol::TaskId& taskId) {
@@ -1352,30 +1383,8 @@ VeloxQueryPlanConverter::toVeloxQueryPlan(
       node->id, std::vector<RowVectorPtr>{rowVector});
 }
 
-std::shared_ptr<const core::ExchangeNode>
-VeloxQueryPlanConverter::toVeloxQueryPlan(
-    const std::shared_ptr<const protocol::RemoteSourceNode>& node,
-    const std::shared_ptr<protocol::TableWriteInfo>& /* tableWriteInfo */,
-    const protocol::TaskId& taskId) {
-  auto rowType = toRowType(node->outputVariables);
-  if (node->orderingScheme) {
-    std::vector<core::FieldAccessTypedExprPtr> sortingKeys;
-    std::vector<core::SortOrder> sortingOrders;
-    sortingKeys.reserve(node->orderingScheme->orderBy.size());
-    sortingOrders.reserve(node->orderingScheme->orderBy.size());
-
-    for (const auto& orderBy : node->orderingScheme->orderBy) {
-      sortingKeys.emplace_back(exprConverter_.toVeloxExpr(orderBy.variable));
-      sortingOrders.emplace_back(toVeloxSortOrder(orderBy.sortOrder));
-    }
-    return std::make_shared<core::MergeExchangeNode>(
-        node->id, rowType, sortingKeys, sortingOrders);
-  }
-  return std::make_shared<core::ExchangeNode>(node->id, rowType);
-}
-
 std::shared_ptr<const core::TableScanNode>
-VeloxQueryPlanConverter::toVeloxQueryPlan(
+VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::TableScanNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& /* tableWriteInfo */,
     const protocol::TaskId& taskId) {
@@ -1392,7 +1401,7 @@ VeloxQueryPlanConverter::toVeloxQueryPlan(
 }
 
 std::vector<core::FieldAccessTypedExprPtr>
-VeloxQueryPlanConverter::toVeloxExprs(
+VeloxQueryPlanConverterBase::toVeloxExprs(
     const std::vector<protocol::VariableReferenceExpression>& variables) {
   std::vector<core::FieldAccessTypedExprPtr> fields;
   fields.reserve(variables.size());
@@ -1403,7 +1412,7 @@ VeloxQueryPlanConverter::toVeloxExprs(
 }
 
 std::shared_ptr<const core::AggregationNode>
-VeloxQueryPlanConverter::toVeloxQueryPlan(
+VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::AggregationNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1461,7 +1470,7 @@ VeloxQueryPlanConverter::toVeloxQueryPlan(
 }
 
 std::shared_ptr<const core::GroupIdNode>
-VeloxQueryPlanConverter::toVeloxQueryPlan(
+VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::GroupIdNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1512,7 +1521,8 @@ VeloxQueryPlanConverter::toVeloxQueryPlan(
       toVeloxQueryPlan(node->source, tableWriteInfo, taskId));
 }
 
-std::shared_ptr<const core::PlanNode> VeloxQueryPlanConverter::toVeloxQueryPlan(
+std::shared_ptr<const core::PlanNode>
+VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::DistinctLimitNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1554,7 +1564,7 @@ core::JoinType toJoinType(protocol::JoinNodeType type) {
 }
 } // namespace
 
-core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
+core::PlanNodePtr VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::JoinNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1581,6 +1591,7 @@ core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
   return std::make_shared<core::HashJoinNode>(
       node->id,
       joinType,
+      false,
       leftKeys,
       rightKeys,
       node->filter ? exprConverter_.toVeloxExpr(*node->filter) : nullptr,
@@ -1589,7 +1600,7 @@ core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
       toRowType(node->outputVariables));
 }
 
-core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
+core::PlanNodePtr VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::MergeJoinNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1616,7 +1627,8 @@ core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
       toRowType(node->outputVariables));
 }
 
-std::shared_ptr<const core::TopNNode> VeloxQueryPlanConverter::toVeloxQueryPlan(
+std::shared_ptr<const core::TopNNode>
+VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::TopNNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1638,7 +1650,7 @@ std::shared_ptr<const core::TopNNode> VeloxQueryPlanConverter::toVeloxQueryPlan(
 }
 
 std::shared_ptr<const core::LimitNode>
-VeloxQueryPlanConverter::toVeloxQueryPlan(
+VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::LimitNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1651,7 +1663,7 @@ VeloxQueryPlanConverter::toVeloxQueryPlan(
 }
 
 std::shared_ptr<const core::OrderByNode>
-VeloxQueryPlanConverter::toVeloxQueryPlan(
+VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::SortNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1671,7 +1683,7 @@ VeloxQueryPlanConverter::toVeloxQueryPlan(
 }
 
 std::shared_ptr<const core::TableWriteNode>
-VeloxQueryPlanConverter::toVeloxQueryPlan(
+VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::TableWriterNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1732,12 +1744,12 @@ VeloxQueryPlanConverter::toVeloxQueryPlan(
       node->columnNames,
       insertTableHandle,
       outputType,
-      connector::WriteProtocol::CommitStrategy::kNoCommit,
+      connector::CommitStrategy::kNoCommit,
       toVeloxQueryPlan(node->source, tableWriteInfo, taskId));
 }
 
 std::shared_ptr<const core::UnnestNode>
-VeloxQueryPlanConverter::toVeloxQueryPlan(
+VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::UnnestNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1762,7 +1774,7 @@ VeloxQueryPlanConverter::toVeloxQueryPlan(
 }
 
 std::shared_ptr<const core::EnforceSingleRowNode>
-VeloxQueryPlanConverter::toVeloxQueryPlan(
+VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::EnforceSingleRowNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1771,7 +1783,7 @@ VeloxQueryPlanConverter::toVeloxQueryPlan(
 }
 
 std::shared_ptr<const core::AssignUniqueIdNode>
-VeloxQueryPlanConverter::toVeloxQueryPlan(
+VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::AssignUniqueId>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1793,7 +1805,7 @@ VeloxQueryPlanConverter::toVeloxQueryPlan(
       toVeloxQueryPlan(node->source, tableWriteInfo, taskId));
 }
 
-core::WindowNode::Function VeloxQueryPlanConverter::toVeloxWindowFunction(
+core::WindowNode::Function VeloxQueryPlanConverterBase::toVeloxWindowFunction(
     const protocol::Function& func) {
   core::WindowNode::Function windowFunc;
   windowFunc.functionCall =
@@ -1816,7 +1828,7 @@ core::WindowNode::Function VeloxQueryPlanConverter::toVeloxWindowFunction(
 }
 
 std::shared_ptr<const velox::core::WindowNode>
-VeloxQueryPlanConverter::toVeloxQueryPlan(
+VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::WindowNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1828,12 +1840,14 @@ VeloxQueryPlanConverter::toVeloxQueryPlan(
 
   std::vector<core::FieldAccessTypedExprPtr> sortFields;
   std::vector<core::SortOrder> sortOrders;
-  auto nodeSpecOrdering = node->specification.orderingScheme->orderBy;
-  sortFields.reserve(nodeSpecOrdering.size());
-  sortOrders.reserve(nodeSpecOrdering.size());
-  for (const auto& spec : nodeSpecOrdering) {
-    sortFields.emplace_back(exprConverter_.toVeloxExpr(spec.variable));
-    sortOrders.emplace_back(toVeloxSortOrder(spec.sortOrder));
+  if (node->specification.orderingScheme) {
+    auto nodeSpecOrdering = node->specification.orderingScheme->orderBy;
+    sortFields.reserve(nodeSpecOrdering.size());
+    sortOrders.reserve(nodeSpecOrdering.size());
+    for (const auto& spec : nodeSpecOrdering) {
+      sortFields.emplace_back(exprConverter_.toVeloxExpr(spec.variable));
+      sortOrders.emplace_back(toVeloxSortOrder(spec.sortOrder));
+    }
   }
 
   std::vector<std::string> windowNames;
@@ -1855,7 +1869,7 @@ VeloxQueryPlanConverter::toVeloxQueryPlan(
       toVeloxQueryPlan(node->source, tableWriteInfo, taskId));
 }
 
-core::PlanNodePtr VeloxQueryPlanConverter::toVeloxQueryPlan(
+core::PlanNodePtr VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<const protocol::PlanNode>& node,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1943,10 +1957,6 @@ core::ExecutionStrategy toStrategy(protocol::StageExecutionStrategy strategy) {
 
     case protocol::StageExecutionStrategy::
         FIXED_LIFESPAN_SCHEDULE_GROUPED_EXECUTION:
-      VELOX_UNSUPPORTED(
-          "FIXED_LIFESPAN_SCHEDULE_GROUPED_EXECUTION "
-          "Stage Execution Strategy is not supported");
-
     case protocol::StageExecutionStrategy::
         DYNAMIC_LIFESPAN_SCHEDULE_GROUPED_EXECUTION:
       return core::ExecutionStrategy::kGrouped;
@@ -1960,7 +1970,7 @@ core::ExecutionStrategy toStrategy(protocol::StageExecutionStrategy strategy) {
 }
 } // namespace
 
-core::PlanFragment VeloxQueryPlanConverter::toVeloxQueryPlan(
+core::PlanFragment VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const protocol::PlanFragment& fragment,
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
@@ -1971,6 +1981,15 @@ core::PlanFragment VeloxQueryPlanConverter::toVeloxQueryPlan(
   planFragment.executionStrategy =
       toStrategy(fragment.stageExecutionDescriptor.stageExecutionStrategy);
   planFragment.numSplitGroups = descriptor.totalLifespans;
+  for (const auto& planNodeId : descriptor.groupedExecutionScanNodes) {
+    planFragment.groupedExecutionLeafNodeIds.emplace(planNodeId);
+  }
+  if (planFragment.executionStrategy == core::ExecutionStrategy::kGrouped) {
+    VELOX_CHECK(
+        !planFragment.groupedExecutionLeafNodeIds.empty(),
+        "groupedExecutionScanNodes cannot be empty if stage execution strategy "
+        "is grouped execution");
+  }
 
   if (auto output = std::dynamic_pointer_cast<const protocol::OutputNode>(
           fragment.root)) {
@@ -2125,4 +2144,113 @@ core::PlanFragment VeloxQueryPlanConverter::toVeloxQueryPlan(
         toJsonString(partitioningHandle));
   }
 }
+
+core::PlanNodePtr VeloxQueryPlanConverterBase::toVeloxQueryPlan(
+    const std::shared_ptr<const protocol::OutputNode>& node,
+    const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
+    const protocol::TaskId& taskId) {
+  return core::PartitionedOutputNode::single(
+      node->id,
+      toRowType(node->outputVariables),
+      VeloxQueryPlanConverterBase::toVeloxQueryPlan(
+          node->source, tableWriteInfo, taskId));
+}
+
+velox::core::PlanNodePtr VeloxInteractiveQueryPlanConverter::toVeloxQueryPlan(
+    const std::shared_ptr<const protocol::RemoteSourceNode>& node,
+    const std::shared_ptr<protocol::TableWriteInfo>& /* tableWriteInfo */,
+    const protocol::TaskId& taskId) {
+  auto rowType = toRowType(node->outputVariables);
+  if (node->orderingScheme) {
+    std::vector<core::FieldAccessTypedExprPtr> sortingKeys;
+    std::vector<core::SortOrder> sortingOrders;
+    sortingKeys.reserve(node->orderingScheme->orderBy.size());
+    sortingOrders.reserve(node->orderingScheme->orderBy.size());
+
+    for (const auto& orderBy : node->orderingScheme->orderBy) {
+      sortingKeys.emplace_back(exprConverter_.toVeloxExpr(orderBy.variable));
+      sortingOrders.emplace_back(toVeloxSortOrder(orderBy.sortOrder));
+    }
+    return std::make_shared<core::MergeExchangeNode>(
+        node->id, rowType, sortingKeys, sortingOrders);
+  }
+  return std::make_shared<core::ExchangeNode>(node->id, rowType);
+}
+
+velox::core::PlanFragment VeloxBatchQueryPlanConverter::toVeloxQueryPlan(
+    const protocol::PlanFragment& fragment,
+    const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
+    const protocol::TaskId& taskId) {
+  auto planFragment = VeloxQueryPlanConverterBase::toVeloxQueryPlan(
+      fragment, tableWriteInfo, taskId);
+
+  // If the serializedShuffleWriteInfo is not nullptr, it means this fragment
+  // ends with a shuffle stage. We convert the PartitionedOutputNode to a
+  // chain of following nodes:
+  // (1) A PartitionAndSerializeNode.
+  // (2) A "gather" LocalPartitionNode that gathers results from multiple
+  //     threads to one thread.
+  // (3) A ShuffleWriteNode.
+  // To be noted, whether the last node of the plan is PartitionedOutputNode
+  // can't guarantee the query has shuffle stage, for example a plan with
+  // TableWriteNode can also have PartitionedOutputNode to distribute the
+  // metadata to coordinator.
+  if (serializedShuffleWriteInfo_ == nullptr) {
+    return planFragment;
+  }
+
+  auto partitionedOutputNode =
+      std::dynamic_pointer_cast<const core::PartitionedOutputNode>(
+          planFragment.planNode);
+  VELOX_CHECK(
+      partitionedOutputNode != nullptr, "PartitionedOutputNode is required");
+  if (partitionedOutputNode->isBroadcast()) {
+    VELOX_UNSUPPORTED(
+        "Broadcast partitioned output node in batch is currently not "
+        "supported.");
+  }
+
+  auto partitionAndSerializeNode = std::make_shared<
+      operators::PartitionAndSerializeNode>(
+      "shuffle-partition-serialize",
+      partitionedOutputNode->keys(),
+      partitionedOutputNode->numPartitions(),
+      ROW({std::string(operators::PartitionAndSerializeNode::
+                           kPartitionColumnNameDefault),
+           std::string(
+               operators::PartitionAndSerializeNode::kDataColumnNameDefault)},
+          {INTEGER(), VARBINARY()}),
+      partitionedOutputNode->sources().back(),
+      partitionedOutputNode->partitionFunctionFactory());
+
+  auto localPartitionNode = std::make_shared<core::LocalPartitionNode>(
+      "shuffle-gather",
+      core::LocalPartitionNode::Type::kGather,
+      nullptr,
+      std::vector<core::PlanNodePtr>{partitionAndSerializeNode});
+
+  auto shuffleWriteNode = std::make_shared<operators::ShuffleWriteNode>(
+      "root",
+      shuffleName_,
+      std::move(*serializedShuffleWriteInfo_),
+      std::move(localPartitionNode));
+
+  // For presto_cpp, the last node must be the PartitionedOutputNode in order to
+  // get the output (e.g actual data or metadata) and send back to coordinator.
+  auto finalPartitionedOutputNode = core::PartitionedOutputNode::single(
+      "final-partitioned-output",
+      shuffleWriteNode->outputType(),
+      {shuffleWriteNode});
+  planFragment.planNode = finalPartitionedOutputNode;
+  return planFragment;
+}
+
+velox::core::PlanNodePtr VeloxBatchQueryPlanConverter::toVeloxQueryPlan(
+    const std::shared_ptr<const protocol::RemoteSourceNode>& node,
+    const std::shared_ptr<protocol::TableWriteInfo>& /* tableWriteInfo */,
+    const protocol::TaskId& taskId) {
+  auto rowType = toRowType(node->outputVariables);
+  return std::make_shared<operators::ShuffleReadNode>(node->id, rowType);
+}
+
 } // namespace facebook::presto

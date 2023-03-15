@@ -24,14 +24,18 @@ import io.airlift.units.DataSize.Unit;
 public class CarrotCacheConfig
 {
   
-    public static String CACHE_NAME = "data-cache";
+    public static String CACHE_NAME = "data-page-cache";
+    public static String DATA_PAGE_SIZE = "cache.carrot.data-page-size";
+    public static String IO_BUFFER_SIZE = "cache.carrot.io-buffer-size";
+    public static String IO_POOL_SIZE = "cache.carrot.io-pool-size";
+    
     
     private boolean metricsCollectionEnabled = true;
     private String metricsDomain = "com.facebook.carrot";
     private DataSize maxCacheSize = new DataSize(500, GIGABYTE);
     private DataSize dataSegmentSize = new DataSize(128, Unit.MEGABYTE);
     private DataSize cachePageSize = new DataSize(1, Unit.MEGABYTE);
-    private DataSize ioBufferSize = new DataSize(256, Unit.KILOBYTE);
+    private DataSize ioBufferSize = new DataSize(2, Unit.MEGABYTE);
     private int ioPoolSize = 32;
     private boolean configValidationEnabled = false;
     private boolean cacheQuotaEnabled = false;
@@ -44,9 +48,9 @@ public class CarrotCacheConfig
     // All entries whose popularity is below this value will be discarded during GC
     private double cacheScavengerDumpEntryBelow = 0.5;
     // Garbage collection starts if storage usage exceeds this ratio
-    private double cacheScavengerStartUsageRatio = 0.95;
+    private double cacheScavengerStartUsageRatio = 0.99;
     // Garbage collection stops if storage usage falls below this ratio
-    private double cacheScavengerStopUsageRatio = 0.90;
+    private double cacheScavengerStopUsageRatio = 0.95;
     // SLRU eviction policy new item insertion point (0 - 7) when 0 - its LRU
     private int evictionSLRUInsertionPoint = 5;
     // Start index of slot power ( 2 ** x  - initial size of the hash-table )
@@ -58,6 +62,10 @@ public class CarrotCacheConfig
     // Minimum active data set ration - set it to 0.
     private double minActiveDatasetRatio = 0.9;
 
+    public static String toCachePropertyName(String name) {
+      return CACHE_NAME + "." + name;
+    }
+    
     public boolean isMetricsCollectionEnabled()
     {
         return metricsCollectionEnabled;

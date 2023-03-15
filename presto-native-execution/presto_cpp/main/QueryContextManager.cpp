@@ -21,16 +21,12 @@ using namespace facebook::velox;
 using facebook::presto::protocol::QueryId;
 using facebook::presto::protocol::TaskId;
 
-DEFINE_int32(
-    num_query_threads,
-    std::thread::hardware_concurrency(),
-    "Process-wide number of query execution threads");
-
 namespace facebook::presto {
 namespace {
 static std::shared_ptr<folly::CPUThreadPoolExecutor>& executor() {
-  static auto executor =
-      std::make_shared<folly::CPUThreadPoolExecutor>(FLAGS_num_query_threads);
+  static auto executor = std::make_shared<folly::CPUThreadPoolExecutor>(
+      SystemConfig::instance()->numQueryThreads(),
+      std::make_shared<folly::NamedThreadFactory>("Driver"));
   return executor;
 }
 
@@ -40,14 +36,17 @@ std::shared_ptr<folly::IOThreadPoolExecutor> spillExecutor() {
     return nullptr;
   }
   static auto executor = std::make_shared<folly::IOThreadPoolExecutor>(
-      numSpillThreads,
-      std::make_shared<folly::NamedThreadFactory>("SpillerExec"));
+      numSpillThreads, std::make_shared<folly::NamedThreadFactory>("Spiller"));
   return executor;
 }
 } // namespace
 
 folly::CPUThreadPoolExecutor* driverCPUExecutor() {
   return executor().get();
+}
+
+folly::IOThreadPoolExecutor* spillExecutorPtr() {
+  return spillExecutor().get();
 }
 
 std::shared_ptr<core::QueryCtx> QueryContextManager::findOrCreateQueryCtx(
@@ -83,22 +82,18 @@ std::shared_ptr<core::QueryCtx> QueryContextManager::findOrCreateQueryCtx(
         {entry.first, std::make_shared<core::MemConfig>(entry.second)});
   }
 
-  int64_t maxUserMemoryPerNode =
+  const int64_t maxQueryMemoryPerNode =
       getMaxMemoryPerNode(kQueryMaxMemoryPerNode, kDefaultMaxMemoryPerNode);
-  int64_t maxSystemMemoryPerNode = kDefaultMaxMemoryPerNode;
-  int64_t maxTotalMemoryPerNode = getMaxMemoryPerNode(
-      kQueryMaxTotalMemoryPerNode, kDefaultMaxMemoryPerNode);
-
   auto pool =
-      memory::getProcessDefaultMemoryManager().getRoot().addChild("query_root");
-  pool->setMemoryUsageTracker(velox::memory::MemoryUsageTracker::create(
-      maxUserMemoryPerNode, maxSystemMemoryPerNode, maxTotalMemoryPerNode));
+      memory::getProcessDefaultMemoryManager().getRoot().addChild(queryId);
+  pool->setMemoryUsageTracker(
+      velox::memory::MemoryUsageTracker::create(maxQueryMemoryPerNode));
 
   auto queryCtx = std::make_shared<core::QueryCtx>(
       executor().get(),
       config,
       connectorConfigs,
-      memory::MappedMemory::getInstance(),
+      memory::MemoryAllocator::getInstance(),
       std::move(pool),
       spillExecutor(),
       queryId);

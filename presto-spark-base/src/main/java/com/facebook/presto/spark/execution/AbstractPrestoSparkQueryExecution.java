@@ -17,12 +17,13 @@ import com.facebook.airlift.json.Codec;
 import com.facebook.airlift.json.JsonCodec;
 import com.facebook.airlift.log.Logger;
 import com.facebook.presto.Session;
-import com.facebook.presto.SystemSessionProperties;
 import com.facebook.presto.common.Page;
 import com.facebook.presto.common.type.Type;
+import com.facebook.presto.cost.HistoryBasedPlanStatisticsTracker;
 import com.facebook.presto.event.QueryMonitor;
 import com.facebook.presto.execution.ExecutionFailureInfo;
 import com.facebook.presto.execution.QueryInfo;
+import com.facebook.presto.execution.QueryManagerConfig;
 import com.facebook.presto.execution.QueryState;
 import com.facebook.presto.execution.QueryStateTimer;
 import com.facebook.presto.execution.StageInfo;
@@ -45,8 +46,10 @@ import com.facebook.presto.spark.PrestoSparkStorageBasedBroadcastDependency;
 import com.facebook.presto.spark.PrestoSparkTaskDescriptor;
 import com.facebook.presto.spark.RddAndMore;
 import com.facebook.presto.spark.classloader_interface.IPrestoSparkQueryExecution;
+import com.facebook.presto.spark.classloader_interface.IPrestoSparkTaskExecutor;
 import com.facebook.presto.spark.classloader_interface.MutablePartitionId;
 import com.facebook.presto.spark.classloader_interface.PrestoSparkExecutionException;
+import com.facebook.presto.spark.classloader_interface.PrestoSparkJavaExecutionTaskInputs;
 import com.facebook.presto.spark.classloader_interface.PrestoSparkMutableRow;
 import com.facebook.presto.spark.classloader_interface.PrestoSparkPartitioner;
 import com.facebook.presto.spark.classloader_interface.PrestoSparkSerializedPage;
@@ -55,6 +58,7 @@ import com.facebook.presto.spark.classloader_interface.PrestoSparkShuffleStats;
 import com.facebook.presto.spark.classloader_interface.PrestoSparkStorageHandle;
 import com.facebook.presto.spark.classloader_interface.PrestoSparkTaskExecutorFactoryProvider;
 import com.facebook.presto.spark.classloader_interface.PrestoSparkTaskOutput;
+import com.facebook.presto.spark.classloader_interface.SerializedPrestoSparkTaskDescriptor;
 import com.facebook.presto.spark.classloader_interface.SerializedTaskInfo;
 import com.facebook.presto.spark.planner.PrestoSparkPlanFragmenter;
 import com.facebook.presto.spark.planner.PrestoSparkQueryPlanner.PlanAndMore;
@@ -63,14 +67,15 @@ import com.facebook.presto.spark.util.PrestoSparkTransactionUtils;
 import com.facebook.presto.spi.ConnectorId;
 import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.PrestoException;
-import com.facebook.presto.spi.QueryId;
 import com.facebook.presto.spi.WarningCollector;
 import com.facebook.presto.spi.connector.ConnectorCapabilities;
 import com.facebook.presto.spi.connector.ConnectorNodePartitioningProvider;
 import com.facebook.presto.spi.page.PagesSerde;
+import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.storage.StorageCapabilities;
 import com.facebook.presto.spi.storage.TempDataOperationContext;
 import com.facebook.presto.spi.storage.TempStorage;
+import com.facebook.presto.sql.analyzer.FeaturesConfig;
 import com.facebook.presto.sql.planner.PartitioningHandle;
 import com.facebook.presto.sql.planner.PartitioningProviderManager;
 import com.facebook.presto.sql.planner.PartitioningScheme;
@@ -78,14 +83,18 @@ import com.facebook.presto.sql.planner.PlanFragment;
 import com.facebook.presto.sql.planner.SubPlan;
 import com.facebook.presto.sql.planner.plan.PlanFragmentId;
 import com.facebook.presto.transaction.TransactionManager;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ComparisonChain;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
+import org.apache.spark.MapOutputStatistics;
 import org.apache.spark.Partitioner;
-import org.apache.spark.SparkContext;
+import org.apache.spark.ShuffleDependency;
+import org.apache.spark.SimpleFutureAction;
 import org.apache.spark.SparkException;
+import org.apache.spark.api.java.JavaFutureAction;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.broadcast.Broadcast;
@@ -93,7 +102,10 @@ import org.apache.spark.rdd.ShuffledRDD;
 import org.apache.spark.util.CollectionAccumulator;
 import scala.Tuple2;
 
+import javax.annotation.concurrent.GuardedBy;
+
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -114,21 +126,24 @@ import static com.facebook.presto.execution.scheduler.StreamingPlanSection.extra
 import static com.facebook.presto.execution.scheduler.TableWriteInfo.createTableWriteInfo;
 import static com.facebook.presto.spark.PrestoSparkSessionProperties.getSparkBroadcastJoinMaxMemoryOverride;
 import static com.facebook.presto.spark.PrestoSparkSessionProperties.isStorageBasedBroadcastJoinEnabled;
-import static com.facebook.presto.spark.PrestoSparkSettingsRequirements.SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS_CONFIG;
 import static com.facebook.presto.spark.SparkErrorCode.EXCEEDED_SPARK_DRIVER_MAX_RESULT_SIZE;
 import static com.facebook.presto.spark.SparkErrorCode.GENERIC_SPARK_ERROR;
 import static com.facebook.presto.spark.SparkErrorCode.SPARK_EXECUTOR_LOST;
 import static com.facebook.presto.spark.SparkErrorCode.SPARK_EXECUTOR_OOM;
 import static com.facebook.presto.spark.SparkErrorCode.UNSUPPORTED_STORAGE_TYPE;
+import static com.facebook.presto.spark.classloader_interface.ScalaUtils.collectScalaIterator;
+import static com.facebook.presto.spark.classloader_interface.ScalaUtils.emptyScalaIterator;
 import static com.facebook.presto.spark.planner.PrestoSparkRddFactory.getRDDName;
 import static com.facebook.presto.spark.util.PrestoSparkFailureUtils.toPrestoSparkFailure;
 import static com.facebook.presto.spark.util.PrestoSparkUtils.classTag;
+import static com.facebook.presto.spark.util.PrestoSparkUtils.computeNextTimeout;
 import static com.facebook.presto.spark.util.PrestoSparkUtils.deserializeZstdCompressed;
 import static com.facebook.presto.spark.util.PrestoSparkUtils.toSerializedPage;
 import static com.facebook.presto.spi.StandardErrorCode.EXCEEDED_TIME_LIMIT;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
 import static com.facebook.presto.spi.connector.ConnectorCapabilities.SUPPORTS_PAGE_SINK_COMMIT;
 import static com.facebook.presto.spi.storage.StorageCapabilities.REMOTELY_ACCESSIBLE;
+import static com.facebook.presto.sql.planner.PlanFragmenterUtils.isRootFragment;
 import static com.facebook.presto.sql.planner.SystemPartitioningHandle.FIXED_ARBITRARY_DISTRIBUTION;
 import static com.facebook.presto.sql.planner.SystemPartitioningHandle.FIXED_BROADCAST_DISTRIBUTION;
 import static com.facebook.presto.sql.planner.SystemPartitioningHandle.FIXED_HASH_DISTRIBUTION;
@@ -137,6 +152,8 @@ import static com.facebook.presto.util.Failures.toFailure;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static com.google.common.util.concurrent.Futures.getUnchecked;
 import static io.airlift.units.DataSize.Unit.BYTE;
 import static java.lang.Math.min;
 import static java.util.Collections.unmodifiableList;
@@ -178,12 +195,17 @@ public abstract class AbstractPrestoSparkQueryExecution
     protected final long queryCompletionDeadline;
     protected final TempStorage tempStorage;
     protected final NodeMemoryConfig nodeMemoryConfig;
+    protected final FeaturesConfig featuresConfig;
+    protected final QueryManagerConfig queryManagerConfig;
     protected final Set<PrestoSparkServiceWaitTimeMetrics> waitTimeMetrics;
     protected final Optional<ErrorClassifier> errorClassifier;
     protected final JavaSparkContext sparkContext;
     protected final PrestoSparkPlanFragmenter planFragmenter;
     protected final PartitioningProviderManager partitioningProviderManager;
+    protected final HistoryBasedPlanStatisticsTracker historyBasedPlanStatisticsTracker;
     private AtomicReference<SubPlan> finalFragmentedPlan = new AtomicReference<>();
+    @GuardedBy("this")
+    private final Map<PlanFragmentId, RddAndMore> fragmentIdToRdd = new HashMap<>();
 
     public AbstractPrestoSparkQueryExecution(
             JavaSparkContext sparkContext,
@@ -213,11 +235,14 @@ public abstract class AbstractPrestoSparkQueryExecution
             Optional<String> queryDataOutputLocation,
             TempStorage tempStorage,
             NodeMemoryConfig nodeMemoryConfig,
+            FeaturesConfig featuresConfig,
+            QueryManagerConfig queryManagerConfig,
             Set<PrestoSparkServiceWaitTimeMetrics> waitTimeMetrics,
             Optional<ErrorClassifier> errorClassifier,
             PrestoSparkPlanFragmenter planFragmenter,
             Metadata metadata,
-            PartitioningProviderManager partitioningProviderManager)
+            PartitioningProviderManager partitioningProviderManager,
+            HistoryBasedPlanStatisticsTracker historyBasedPlanStatisticsTracker)
     {
         this.sparkContext = requireNonNull(sparkContext, "sparkContext is null");
         this.session = requireNonNull(session, "session is null");
@@ -247,11 +272,14 @@ public abstract class AbstractPrestoSparkQueryExecution
         this.queryDataOutputLocation = requireNonNull(queryDataOutputLocation, "queryDataOutputLocation is null");
         this.tempStorage = requireNonNull(tempStorage, "tempStorage is null");
         this.nodeMemoryConfig = requireNonNull(nodeMemoryConfig, "nodeMemoryConfig is null");
+        this.featuresConfig = requireNonNull(featuresConfig, "featuresConfig is null");
+        this.queryManagerConfig = requireNonNull(queryManagerConfig, "queryManagerConfig is null");
         this.waitTimeMetrics = requireNonNull(waitTimeMetrics, "waitTimeMetrics is null");
         this.errorClassifier = requireNonNull(errorClassifier, "errorClassifier is null");
         this.planFragmenter = requireNonNull(planFragmenter, "planFragmenter is null");
         this.metadata = requireNonNull(metadata, "metadata is null");
         this.partitioningProviderManager = requireNonNull(partitioningProviderManager, "partitioningProviderManager is null");
+        this.historyBasedPlanStatisticsTracker = requireNonNull(historyBasedPlanStatisticsTracker, "historyBasedPlanStatisticsTracker is null");
     }
 
     protected static JavaPairRDD<MutablePartitionId, PrestoSparkMutableRow> partitionBy(
@@ -407,7 +435,9 @@ public abstract class AbstractPrestoSparkQueryExecution
 
     public List<Type> getOutputTypes()
     {
-        return getFinalFragmentedPlan().getFragment().getTypes();
+        Optional<SubPlan> subPlanOptional = getFinalFragmentedPlan();
+        verify(subPlanOptional.isPresent(), "finalFragmentedPlan is null");
+        return subPlanOptional.get().getFragment().getTypes();
     }
 
     public Optional<String> getUpdateType()
@@ -418,7 +448,72 @@ public abstract class AbstractPrestoSparkQueryExecution
     protected abstract List<Tuple2<MutablePartitionId, PrestoSparkSerializedPage>> doExecute()
             throws SparkException, TimeoutException;
 
-    protected <T extends PrestoSparkTaskOutput> RddAndMore<T> createRdd(SubPlan subPlan, Class<T> outputType, TableWriteInfo tableWriteInfo)
+    protected List<Tuple2<MutablePartitionId, PrestoSparkSerializedPage>> collectPages(TableWriteInfo tableWriteInfo, PlanFragment rootFragment, Map<PlanFragmentId, RddAndMore<PrestoSparkSerializedPage>> inputRdds)
+            throws SparkException, TimeoutException
+    {
+        PrestoSparkTaskDescriptor taskDescriptor = new PrestoSparkTaskDescriptor(
+                session.toSessionRepresentation(),
+                session.getIdentity().getExtraCredentials(),
+                rootFragment,
+                tableWriteInfo);
+        SerializedPrestoSparkTaskDescriptor serializedTaskDescriptor = new SerializedPrestoSparkTaskDescriptor(sparkTaskDescriptorJsonCodec.toJsonBytes(taskDescriptor));
+
+        Map<String, JavaFutureAction<List<Tuple2<MutablePartitionId, PrestoSparkSerializedPage>>>> inputFutures = inputRdds.entrySet().stream()
+                .collect(toImmutableMap(entry -> entry.getKey().toString(), entry -> entry.getValue().getRdd().collectAsync()));
+
+        PrestoSparkQueryExecutionFactory.waitForActionsCompletionWithTimeout(inputFutures.values(), computeNextTimeout(queryCompletionDeadline), MILLISECONDS, waitTimeMetrics);
+
+        // release memory retained by the RDDs (splits and dependencies)
+        inputRdds = null;
+
+        ImmutableMap.Builder<String, List<PrestoSparkSerializedPage>> inputs = ImmutableMap.builder();
+        long totalNumberOfPagesReceived = 0;
+        long totalCompressedSizeInBytes = 0;
+        long totalUncompressedSizeInBytes = 0;
+        for (Map.Entry<String, JavaFutureAction<List<Tuple2<MutablePartitionId, PrestoSparkSerializedPage>>>> inputFuture : inputFutures.entrySet()) {
+            // Use a mutable list to allow memory release on per page basis
+            List<PrestoSparkSerializedPage> pages = new ArrayList<>();
+            List<Tuple2<MutablePartitionId, PrestoSparkSerializedPage>> tuples = getUnchecked(inputFuture.getValue());
+            long currentFragmentOutputCompressedSizeInBytes = 0;
+            long currentFragmentOutputUncompressedSizeInBytes = 0;
+            for (Tuple2<MutablePartitionId, PrestoSparkSerializedPage> tuple : tuples) {
+                PrestoSparkSerializedPage page = tuple._2;
+                currentFragmentOutputCompressedSizeInBytes += page.getSize();
+                currentFragmentOutputUncompressedSizeInBytes += page.getUncompressedSizeInBytes();
+                pages.add(page);
+            }
+            log.info(
+                    "Received %s pages from fragment %s. Compressed size: %s. Uncompressed size: %s.",
+                    pages.size(),
+                    inputFuture.getKey(),
+                    DataSize.succinctBytes(currentFragmentOutputCompressedSizeInBytes),
+                    DataSize.succinctBytes(currentFragmentOutputUncompressedSizeInBytes));
+            totalNumberOfPagesReceived += pages.size();
+            totalCompressedSizeInBytes += currentFragmentOutputCompressedSizeInBytes;
+            totalUncompressedSizeInBytes += currentFragmentOutputUncompressedSizeInBytes;
+            inputs.put(inputFuture.getKey(), pages);
+        }
+
+        log.info(
+                "Received %s pages in total. Compressed size: %s. Uncompressed size: %s.",
+                totalNumberOfPagesReceived,
+                DataSize.succinctBytes(totalCompressedSizeInBytes),
+                DataSize.succinctBytes(totalUncompressedSizeInBytes));
+
+        IPrestoSparkTaskExecutor<PrestoSparkSerializedPage> prestoSparkTaskExecutor = taskExecutorFactory.create(
+                0,
+                0,
+                serializedTaskDescriptor,
+                emptyScalaIterator(),
+                new PrestoSparkJavaExecutionTaskInputs(ImmutableMap.of(), ImmutableMap.of(), inputs.build()),
+                taskInfoCollector,
+                shuffleStatsCollector,
+                PrestoSparkSerializedPage.class);
+        return collectScalaIterator(prestoSparkTaskExecutor);
+    }
+
+    @VisibleForTesting
+    public <T extends PrestoSparkTaskOutput> RddAndMore<T> createRdd(SubPlan subPlan, Class<T> outputType, TableWriteInfo tableWriteInfo)
             throws SparkException, TimeoutException
     {
         ImmutableMap.Builder<PlanFragmentId, JavaPairRDD<MutablePartitionId, PrestoSparkMutableRow>> rddInputs = ImmutableMap.builder();
@@ -428,39 +523,15 @@ public abstract class AbstractPrestoSparkQueryExecution
         for (SubPlan child : subPlan.getChildren()) {
             PlanFragment childFragment = child.getFragment();
             if (childFragment.getPartitioningScheme().getPartitioning().getHandle().equals(FIXED_BROADCAST_DISTRIBUTION)) {
-                DataSize maxBroadcastMemory = getSparkBroadcastJoinMaxMemoryOverride(session);
-                if (maxBroadcastMemory == null) {
-                    maxBroadcastMemory = new DataSize(min(nodeMemoryConfig.getMaxQueryBroadcastMemory().toBytes(), getQueryMaxBroadcastMemory(session).toBytes()), BYTE);
-                }
+                RddAndMore<?> childRdd;
                 PrestoSparkBroadcastDependency<?> broadcastDependency;
                 if (isStorageBasedBroadcastJoinEnabled(session)) {
-                    validateStorageCapabilities(tempStorage);
-                    RddAndMore<PrestoSparkStorageHandle> childRdd = createRdd(child, PrestoSparkStorageHandle.class, tableWriteInfo);
-                    TempDataOperationContext tempDataOperationContext = new TempDataOperationContext(
-                            session.getSource(),
-                            session.getQueryId().getId(),
-                            session.getClientInfo(),
-                            Optional.of(session.getClientTags()),
-                            session.getIdentity());
-
-                    broadcastDependency = new PrestoSparkStorageBasedBroadcastDependency(
-                            childRdd,
-                            maxBroadcastMemory,
-                            getQueryMaxTotalMemoryPerNode(session),
-                            queryCompletionDeadline,
-                            tempStorage,
-                            tempDataOperationContext,
-                            waitTimeMetrics);
+                    childRdd = createRdd(child, PrestoSparkStorageHandle.class, tableWriteInfo);
                 }
                 else {
-                    RddAndMore<PrestoSparkSerializedPage> childRdd = createRdd(child, PrestoSparkSerializedPage.class, tableWriteInfo);
-                    broadcastDependency = new PrestoSparkMemoryBasedBroadcastDependency(
-                            childRdd,
-                            maxBroadcastMemory,
-                            queryCompletionDeadline,
-                            waitTimeMetrics);
+                    childRdd = createRdd(child, PrestoSparkSerializedPage.class, tableWriteInfo);
                 }
-
+                broadcastDependency = createBroadcastDependency(childRdd);
                 broadcastInputs.put(childFragment.getId(), broadcastDependency.executeBroadcast(sparkContext));
                 broadcastDependencies.add(broadcastDependency);
             }
@@ -508,7 +579,8 @@ public abstract class AbstractPrestoSparkQueryExecution
 
         log.info("Total serialized task info size: %s", DataSize.succinctBytes(totalSerializedTaskInfoSizeInBytes));
 
-        StageInfo stageInfo = PrestoSparkQueryExecutionFactory.createStageInfo(session.getQueryId(), getFinalFragmentedPlan(), taskInfos.build());
+        Optional<StageInfo> stageInfoOptional = getFinalFragmentedPlan().map(finalFragmentedPlan ->
+                PrestoSparkQueryExecutionFactory.createStageInfo(session.getQueryId(), finalFragmentedPlan, taskInfos.build()));
         QueryState queryState = failureInfo.isPresent() ? FAILED : FINISHED;
 
         QueryInfo queryInfo = PrestoSparkQueryExecutionFactory.createQueryInfo(
@@ -519,10 +591,11 @@ public abstract class AbstractPrestoSparkQueryExecution
                 sparkQueueName,
                 failureInfo,
                 queryStateTimer,
-                Optional.of(stageInfo),
+                stageInfoOptional,
                 warningCollector);
 
         queryMonitor.queryCompletedEvent(queryInfo);
+        historyBasedPlanStatisticsTracker.updateStatistics(queryInfo);
         if (queryStatusInfoOutputLocation.isPresent()) {
             PrestoSparkQueryStatusInfo prestoSparkQueryStatusInfo = PrestoSparkQueryExecutionFactory.createPrestoSparkQueryInfo(
                     queryInfo,
@@ -542,11 +615,9 @@ public abstract class AbstractPrestoSparkQueryExecution
         verify(updated, "finalFragmentedPlan is already non-null");
     }
 
-    public final SubPlan getFinalFragmentedPlan()
+    public final Optional<SubPlan> getFinalFragmentedPlan()
     {
-        SubPlan subPlan = finalFragmentedPlan.get();
-        verify(subPlan != null, "finalFragmentedPlan is null");
-        return subPlan;
+        return Optional.ofNullable(finalFragmentedPlan.get());
     }
 
     protected void processShuffleStats()
@@ -644,17 +715,6 @@ public abstract class AbstractPrestoSparkQueryExecution
         return partitioningProviderManager.getPartitioningProvider(connectorId);
     }
 
-    protected int getHashPartitionCount(SparkContext sparkContext, QueryId queryId, Session session, PlanAndMore planAndMore)
-    {
-        int hashPartitionCount = SystemSessionProperties.getHashPartitionCount(session);
-        if (planAndMore.getPhysicalResourceSettings().isEnabled()) {
-            log.info(String.format("Setting optimized executor count to %d for query with id:%s", planAndMore.getPhysicalResourceSettings().getExecutorCount(), queryId.getId()));
-            sparkContext.conf().set(SPARK_DYNAMIC_ALLOCATION_MAX_EXECUTORS_CONFIG, Integer.toString(planAndMore.getPhysicalResourceSettings().getExecutorCount()));
-            hashPartitionCount = planAndMore.getPhysicalResourceSettings().getHashPartitionCount();
-        }
-        return hashPartitionCount;
-    }
-
     protected SubPlan configureOutputPartitioning(Session session, SubPlan subPlan, int hashPartitionCount)
     {
         PlanFragment fragment = subPlan.getFragment();
@@ -672,11 +732,22 @@ public abstract class AbstractPrestoSparkQueryExecution
                         .collect(toImmutableList()));
     }
 
-    protected TableWriteInfo getTableWriteInfo(Session session, SubPlan plan)
+    @VisibleForTesting
+    public TableWriteInfo getTableWriteInfo(Session session, SubPlan plan)
     {
         StreamingPlanSection streamingPlanSection = extractStreamingSections(plan);
         StreamingSubPlan streamingSubPlan = streamingPlanSection.getPlan();
         TableWriteInfo tableWriteInfo = createTableWriteInfo(streamingSubPlan, metadata, session);
+        if (tableWriteInfo.getWriterTarget().isPresent()) {
+            checkPageSinkCommitIsSupported(session, tableWriteInfo.getWriterTarget().get());
+        }
+        return tableWriteInfo;
+    }
+
+    @VisibleForTesting
+    public TableWriteInfo getTableWriteInfo(Session session, PlanNode planNode)
+    {
+        TableWriteInfo tableWriteInfo = createTableWriteInfo(planNode, metadata, session);
         if (tableWriteInfo.getWriterTarget().isPresent()) {
             checkPageSinkCommitIsSupported(session, tableWriteInfo.getWriterTarget().get());
         }
@@ -706,6 +777,149 @@ public abstract class AbstractPrestoSparkQueryExecution
         if (!connectorCapabilities.contains(SUPPORTS_PAGE_SINK_COMMIT)) {
             throw new PrestoException(NOT_SUPPORTED, "catalog does not support page sink commit: " + connectorId);
         }
+    }
+
+    // Returns RDD for specified fragmented SubPlan
+    // This method ensures that RDD is created only once for a sub-plan, where identity is determined by fragment id
+    // For broadcast RDDs, it returns RDD to be broadcasted.
+    protected synchronized <T extends PrestoSparkTaskOutput> RddAndMore<T> createRddForSubPlan(SubPlan subPlan,
+            TableWriteInfo tableWriteInfo,
+            Optional<Class<?>> outputTypeOptional)
+            throws SparkException, TimeoutException
+    {
+        if (fragmentIdToRdd.containsKey(subPlan.getFragment().getId())) {
+            return fragmentIdToRdd.get(subPlan.getFragment().getId());
+        }
+
+        ImmutableMap.Builder<PlanFragmentId, JavaPairRDD<MutablePartitionId, PrestoSparkMutableRow>> rddInputs = ImmutableMap.builder();
+        ImmutableMap.Builder<PlanFragmentId, Broadcast<?>> broadcastInputs = ImmutableMap.builder();
+        ImmutableList.Builder<PrestoSparkBroadcastDependency<?>> broadcastDependencies = ImmutableList.builder();
+        for (SubPlan child : subPlan.getChildren()) {
+            RddAndMore<?> childRdd = createRddForSubPlan(child, tableWriteInfo, Optional.empty());
+            if (childRdd.isBroadcastDistribution()) {
+                PrestoSparkBroadcastDependency<?> broadcastDependency = createBroadcastDependency(childRdd);
+                broadcastInputs.put(child.getFragment().getId(), broadcastDependency.executeBroadcast(sparkContext));
+                broadcastDependencies.add(broadcastDependency);
+            }
+            else {
+                rddInputs.put(child.getFragment().getId(), (JavaPairRDD<MutablePartitionId, PrestoSparkMutableRow>) childRdd.getRdd());
+                broadcastDependencies.addAll(childRdd.getBroadcastDependencies());
+            }
+        }
+
+        Class outputType = outputTypeOptional.orElse(getOutputType(subPlan));
+        JavaPairRDD<MutablePartitionId, T> rdd = rddFactory.createSparkRdd(
+                sparkContext,
+                session,
+                subPlan.getFragment(),
+                rddInputs.build(),
+                broadcastInputs.build(),
+                taskExecutorFactoryProvider,
+                taskInfoCollector,
+                shuffleStatsCollector,
+                tableWriteInfo,
+                outputType);
+
+        // For intermediate, non-broadcast stages - we use partitioned RDD
+        // These stages produce PrestoSparkMutableRow
+        if (outputType == PrestoSparkMutableRow.class) {
+            rdd = (JavaPairRDD<MutablePartitionId, T>) partitionBy(subPlan.getFragment().getId().getId(), (JavaPairRDD<MutablePartitionId, PrestoSparkMutableRow>) rdd, subPlan.getFragment().getPartitioningScheme());
+        }
+
+        RddAndMore rddAndMore = new RddAndMore<T>(rdd, broadcastDependencies.build(), Optional.ofNullable(subPlan.getFragment().getPartitioningScheme().getPartitioning().getHandle()));
+        fragmentIdToRdd.put(subPlan.getFragment().getId(), rddAndMore);
+        return rddAndMore;
+    }
+
+    protected Optional<RddAndMore> getRdd(PlanFragmentId planFragmentId)
+    {
+        return Optional.ofNullable(fragmentIdToRdd.get(planFragmentId));
+    }
+
+    // Returns output type of RDD for a subPlan
+    private Class getOutputType(SubPlan subPlan)
+    {
+        // Root node has SerializedPage as output
+        if (isRootFragment(subPlan.getFragment())) {
+            return PrestoSparkSerializedPage.class;
+        }
+        // Broadcast node can have SerializedPage vs Storage handle depending on how broadcast is done
+        if (isBroadcastDistribution(subPlan)) {
+            return getOutputTypeForBroadcastNode();
+        }
+        // Everything else is Mutable row
+        return PrestoSparkMutableRow.class;
+    }
+
+    private Class getOutputTypeForBroadcastNode()
+    {
+        if (isStorageBasedBroadcastJoinEnabled(session)) {
+            return PrestoSparkStorageHandle.class; // Handle to file
+        }
+        else {
+            return PrestoSparkSerializedPage.class; // In Memory broadcast
+        }
+    }
+
+    private boolean isBroadcastDistribution(SubPlan subPlan)
+    {
+        return subPlan.getFragment().getPartitioningScheme().getPartitioning().getHandle().equals(FIXED_BROADCAST_DISTRIBUTION);
+    }
+
+    private PrestoSparkBroadcastDependency<?> createBroadcastDependency(RddAndMore<?> childRdd)
+    {
+        PrestoSparkBroadcastDependency<?> broadcastDependency;
+        DataSize maxBroadcastMemory = getSparkBroadcastJoinMaxMemoryOverride(session);
+        if (maxBroadcastMemory == null) {
+            maxBroadcastMemory = new DataSize(min(nodeMemoryConfig.getMaxQueryBroadcastMemory().toBytes(), getQueryMaxBroadcastMemory(session).toBytes()), BYTE);
+        }
+        if (isStorageBasedBroadcastJoinEnabled(session)) {
+            validateStorageCapabilities(tempStorage);
+            TempDataOperationContext tempDataOperationContext = new TempDataOperationContext(
+                    session.getSource(),
+                    session.getQueryId().getId(),
+                    session.getClientInfo(),
+                    Optional.of(session.getClientTags()),
+                    session.getIdentity());
+
+            broadcastDependency = new PrestoSparkStorageBasedBroadcastDependency(
+                    (RddAndMore<PrestoSparkStorageHandle>) childRdd,
+                    maxBroadcastMemory,
+                    getQueryMaxTotalMemoryPerNode(session),
+                    queryCompletionDeadline,
+                    tempStorage,
+                    tempDataOperationContext,
+                    waitTimeMetrics);
+        }
+        else {
+            broadcastDependency = new PrestoSparkMemoryBasedBroadcastDependency(
+                    (RddAndMore<PrestoSparkSerializedPage>) childRdd,
+                    maxBroadcastMemory,
+                    queryCompletionDeadline,
+                    waitTimeMetrics);
+        }
+        return broadcastDependency;
+    }
+
+    @VisibleForTesting
+    public FragmentExecutionResult executeFragment(SubPlan plan,
+            TableWriteInfo tableWriteInfo,
+            Optional<Class<?>> outputType)
+            throws SparkException, TimeoutException
+    {
+        RddAndMore rddAndMore = createRddForSubPlan(plan, tableWriteInfo, outputType);
+        List<ShuffleDependency> shuffleDependencies = rddAndMore.getShuffleDependencies();
+        SimpleFutureAction<MapOutputStatistics> mapOutputStatisticsFutureAction = null;
+
+        // For PoS, we don't expect more than 1 shuffle dependency.
+        verify(shuffleDependencies.size() <= 1, "More than 1 shuffle dependency found");
+        if (!shuffleDependencies.isEmpty()
+                // We can only execute map stage on RDD with more than 0 partition(Non-Empty tables)
+                && shuffleDependencies.get(0).rdd().partitions().length > 0) {
+            ShuffleDependency shuffleDependency = shuffleDependencies.get(0);
+            mapOutputStatisticsFutureAction = sparkContext.sc().submitMapStage(shuffleDependency);
+        }
+        return new FragmentExecutionResult(rddAndMore, Optional.ofNullable(mapOutputStatisticsFutureAction));
     }
 
     private static class ShuffleStatsKey

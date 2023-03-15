@@ -44,6 +44,7 @@ import static com.facebook.presto.execution.QueryState.RUNNING;
 import static com.facebook.presto.tests.tpch.TpchQueryRunner.createQueryRunner;
 import static com.facebook.presto.utils.QueryExecutionClientUtil.runToFirstResult;
 import static com.facebook.presto.utils.QueryExecutionClientUtil.runToQueued;
+import static com.facebook.presto.utils.ResourceUtils.getResourceFilePath;
 import static com.google.common.base.Preconditions.checkState;
 import static java.lang.String.format;
 import static java.lang.Thread.sleep;
@@ -89,7 +90,7 @@ public class TestDistributedClusterStatsResource
         runner.getCoordinators().stream().forEach(coordinator -> {
             coordinator.getResourceGroupManager().get().addConfigurationManagerFactory(new FileResourceGroupConfigurationManagerFactory());
             coordinator.getResourceGroupManager().get()
-                    .setConfigurationManager("file", ImmutableMap.of("resource-groups.config-file", getResourceFilePath(RESOURCE_GROUPS_CONFIG_FILE)));
+                    .forceSetConfigurationManager("file", ImmutableMap.of("resource-groups.config-file", getResourceFilePath(RESOURCE_GROUPS_CONFIG_FILE)));
         });
     }
 
@@ -104,11 +105,6 @@ public class TestDistributedClusterStatsResource
         coordinator2 = null;
         resourceManager = null;
         client = null;
-    }
-
-    private String getResourceFilePath(String fileName)
-    {
-        return this.getClass().getClassLoader().getResource(fileName).getPath();
     }
 
     @Test(timeOut = 60_000, enabled = false)
@@ -206,7 +202,8 @@ public class TestDistributedClusterStatsResource
     }
 
     @Test(timeOut = 120_000)
-    public void testClusterStatsLocalInfoReturn() throws Exception
+    public void testClusterStatsLocalInfoReturn()
+            throws Exception
     {
         waitUntilCoordinatorsDiscoveredHealthyInRM(SECONDS.toMillis(15));
         runToFirstResult(client, coordinator2, "SELECT * from tpch.sf100.orders");
