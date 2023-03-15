@@ -24,20 +24,20 @@ Although the initial reaction to the announcement was very favorable, there are 
 4. Both: fragment result cache and Alluxio data cache do not scale well beyound low millios of objects due to high meta overhead in JVM heap memory.
 5. Out of 5 caches only Alluxio is restartable - content of all others fours is lost once Presto server is shutdown.
 6. For data cache scan resistence is very important, but it seems that Alluxio is still looking for the right solution. 
-7. Although not that critical, but single object - single local file approach of both: Data and Fragment result cache has its own drawback - maintanence problems. Managing millions files in local file system requires special approaches and, for example, requires a lot of time to execute a simple shell commands, such ```rm -rf``` or ```ls -lf .```. 
+7. Although not that critical, but single object - single local file approach of both: Data and Fragment result cache has its own drawback - maintanence problems. Managing millions files in local file system requires special approaches. For example, it takes a lot of time to execute simple shell commands, such ```rm -rf``` or ```ls -lf .```. 
 
 ## Velociraptor
 
-**Velociraptor** introduces the single caching solution for all five caches - [Carrot Cache (C2)](https://github.com/VladRodionov/carrot-cache)  
+**Velociraptor** introduces single caching solution for 3 (potentially - 4) caches - [Carrot Cache (C2)](https://github.com/VladRodionov/carrot-cache)  
 
 **Velociraptor**, powered by **C2** solves all above problems:
 
-1. It provides the single solution for all five caches - **C2**
-2. It makes all five caches much more scalable, because **C2** supports diferent mode of operations: RAM (offheap), SSD and Hybrid (RAM -> SSD)
-3. It is very easy on JVM because it barely uses Java heap memory and produces virtually no object garbage during normal operation. **C2** does not use JVM heap to store data or meta information and therefore it does not affect JVM GC at all.
+1. It provides the single solution for most important caches: data page cache, file metadata cache (Parquet and ORC), file list cache and fragment result set cache (optional) - **C2**
+2. It makes these caches much more scalable, because **C2** supports diferent mode of operations: RAM (offheap), SSD and Hybrid (RAM -> SSD). Velociraptor makes possible caching of billions of file statuses and meta inforamtion, which can significantly improve performance in a very large deployments.
+3. Velociraptor significantly reduces JVM heap memory usage by moving caches metadata and data out of Java heap space providing additional room for query engine itself. It is very easy on JVM because it barely uses Java heap memory and produces virtually no object garbage during normal operation. 
 4. It is SSD friendly, providing 20-30x times better SSD endurance compared to Alluxio or a home-grown SSD cache. This is because, all writes in **C2** are performed by large blocks, usually 256MB in size, (as opposed to 1MB writes in Alluxio). Writing data to SSD in 256MB blocks decreases DLWA by factor of 3-8x compared to writing data in 1MB blocks (Alluxio). Another very significant feature of **C2** - it utilizes pluggable Cache admission controller, which can significantly reduce data volume written to SSD while keeping hit ratio almost the same. Combination of log-structured storage and smart admission controller significantly reduces SSD wearing and increases its life span. Default admission controller shows significant reduction in write activity while keeping almost the same cache hit ratio.
 5. **C2** provides several eviction algorithms out of box, some of them are scan-resistant, besides this, admission controller acts as the special suppression buffer for long scan operations. Long scans do not trash the cache, because they have no chances to reach the cache.
-6. ALL FIVE CACHES are restartable now, so it is safe to restart Presto server and have all caches up and runnning again.
+6. All major caches are restartable now, so it is safe to restart Presto server and have major caches up and runnning again.
 7. **C2** number of files in the file system is manageable, usually in low thousands (not millions).
 8. **C2** can scale to billions of objects in a single instance in both: RAM and SSD.
 9. **C2** is very customizable, it allows to replace many components in the system: admission controllers, eviction algorithms, recycling selectors and some others.
@@ -45,7 +45,7 @@ Although the initial reaction to the announcement was very favorable, there are 
 
 ## Current state of development
 
-Data, Fragment results and File List caches have been replaced with **C2** and integrated into Presto. Metadata and Parquet/ORC caches are work in progress.
+Data, Fragment results, File List have been replaced with **C2** and integrated into Presto. Metadata and Parquet/ORC caches are work in progress.
 
 ## How solid Carrot Cache is right now?
 
@@ -73,9 +73,9 @@ Note: **C2** does not support Java 8. Jav 8 has some serious bugs in the File ni
 ## Building Presto + Velociraptor
 
 1. Install **C2** first locally (read above)
-2. Clone **presto-c2** project
+2. Clone **velociraptor** project
 ```
-git clone https://github.com/VladRodionov/presto-c2.git
+git clone https://github.com/VladRodionov/velociraptor.git
 ```
 3. Run the following command from the project root directory:
 
@@ -154,7 +154,7 @@ In etc/catalog/hive.properties
 
 ```
 hive.file-status-cache-expire-time=24h
-hive.file-status-cache-size=1500GB
+hive.file-status-cache-size=150GB
 hive.file-status-cache-tables=*
 # File list cach type : GUAVA (default) or CARROT
 hive.file-status-cache-provider-type=CARROT
@@ -184,7 +184,7 @@ When JMX monitoring is enabled, all **C2** caches expose their metrics under ```
 
 ## Contact info
 
-Fill free to contact me. I am open to any discussions, regarding this technology, sponsoships, contracts or job offers, which will allow me to continue working on both **Velociraptor** and **C2**. On a short notice, I can proide full **Velociraptor** binaries (with all five caches supported) for any interesting party to test and evaluate. 
+Fill free to contact me. I am open to any discussions, regarding this technology, sponsoships, contracts or job offers, which will allow me to continue working on both **Velociraptor** and **C2**. On a short notice, I can proide full **Velociraptor** binaries (with four major caches supported) for any interesting party to test and evaluate. 
 
 Vladimir Rodionov
 e-mail: vladrodionov@gmail.com
