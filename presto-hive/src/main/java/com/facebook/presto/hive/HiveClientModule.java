@@ -59,9 +59,12 @@ import com.facebook.presto.orc.metadata.OrcFileTail;
 import com.facebook.presto.orc.metadata.RowGroupIndex;
 import com.facebook.presto.parquet.ParquetDataSourceId;
 import com.facebook.presto.parquet.cache.CachingParquetMetadataSource;
+import com.facebook.presto.parquet.cache.CarrotCachingParquetMetadataSource;
+import com.facebook.presto.parquet.cache.CarrotCachingParquetMetadataSource.CarrotCacheStatsMBean;
 import com.facebook.presto.parquet.cache.MetadataReader;
 import com.facebook.presto.parquet.cache.ParquetCacheConfig;
 import com.facebook.presto.parquet.cache.ParquetFileMetadata;
+import com.facebook.presto.parquet.cache.ParquetMetadataCacheType;
 import com.facebook.presto.parquet.cache.ParquetMetadataSource;
 import com.facebook.presto.spi.connector.ConnectorMetadataUpdaterProvider;
 import com.facebook.presto.spi.connector.ConnectorNodePartitioningProvider;
@@ -348,6 +351,7 @@ public class HiveClientModule
     {
         ParquetMetadataSource parquetMetadataSource = new MetadataReader();
         if (parquetCacheConfig.isMetadataCacheEnabled()) {
+          if (parquetCacheConfig.getParquetMetadataCacheType() == ParquetMetadataCacheType.GUAVA) {
             Cache<ParquetDataSourceId, ParquetFileMetadata> cache = CacheBuilder.newBuilder()
                     .maximumWeight(parquetCacheConfig.getMetadataCacheSize().toBytes())
                     .weigher((id, metadata) -> ((ParquetFileMetadata) metadata).getMetadataSize())
@@ -357,6 +361,12 @@ public class HiveClientModule
             CacheStatsMBean cacheStatsMBean = new CacheStatsMBean(cache);
             parquetMetadataSource = new CachingParquetMetadataSource(cache, parquetMetadataSource);
             exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_ParquetMetadata"), cacheStatsMBean);
+          } else {
+            parquetMetadataSource = new CarrotCachingParquetMetadataSource(parquetCacheConfig, parquetMetadataSource);
+            CarrotCacheStatsMBean cacheStatsMBean = 
+                ((CarrotCachingParquetMetadataSource)parquetMetadataSource).getStatsMBean();
+            exporter.export(generatedNameOf(CarrotCacheStatsMBean.class, connectorId + "_ParquetMetadata"), cacheStatsMBean);
+          }
         }
         return parquetMetadataSource;
     }

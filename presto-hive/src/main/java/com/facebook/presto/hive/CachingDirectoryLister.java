@@ -316,7 +316,7 @@ public class CachingDirectoryLister
       
       static final String TYPE_NAME = "CARROT";
       
-      static final String CACHE_NAME = "file_status";
+      static final String CACHE_NAME = "file-status";
       
       ObjectCache cache;
       
@@ -355,7 +355,6 @@ public class CachingDirectoryLister
           if (cache == null) {
             Builder builder = new Builder(CACHE_NAME);
             builder = builder
-                
                 .withCacheMaximumSize(maxSize)
                 .withCacheDataSegmentSize(dataSegmentSize)
                 .withRecyclingSelector(LRCRecyclingSelector.class.getName())
