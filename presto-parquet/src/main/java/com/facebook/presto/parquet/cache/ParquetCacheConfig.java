@@ -151,6 +151,19 @@ public class ParquetCacheConfig
         return this.carrotFileDataSegmentSize;
     }
     
+    /**
+     * Set carrot file cache segment size
+     * @param size segment size
+     * @return self
+     */
+    @Config("parquet.carrot.offheap-data-segment-size")
+    @ConfigDescription("The data segment size for offheap cache")
+    public ParquetCacheConfig setCarrotOffheapDataSegmentSize(DataSize size)
+    {
+        this.carrotOffheapDataSegmentSize = size;
+        return this;
+    }
+    
     @MinDataSize("0B")
     public DataSize getCarrotOffheapCacheSize()
     {
@@ -176,18 +189,6 @@ public class ParquetCacheConfig
     {
       this.carrotFileMaxCacheSize = fileCacheSize;
       return this;
-    }
-    /**
-     * Set carrot file cache segment size
-     * @param size segment size
-     * @return self
-     */
-    @Config("parquet.carrot.offheap-data-segment-size")
-    @ConfigDescription("The data segment size for offheap cache")
-    public ParquetCacheConfig setCarrotOffheapDataSegmentSize(DataSize size)
-    {
-        this.carrotOffheapDataSegmentSize = size;
-        return this;
     }
     
     /**

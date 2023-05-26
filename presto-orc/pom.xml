@@ -179,6 +179,15 @@
             <artifactId>jcl-over-slf4j</artifactId>
             <scope>test</scope>
         </dependency>
+ 	<dependency>
+            <groupId>org.bigbase</groupId>
+            <artifactId>carrot-cache</artifactId>
+        </dependency>
+        <dependency>
+                <groupId>com.esotericsoftware.kryo</groupId>
+                <artifactId>kryo5</artifactId>
+                <version>5.3.0</version>
+        </dependency>
     </dependencies>
 
     <build>

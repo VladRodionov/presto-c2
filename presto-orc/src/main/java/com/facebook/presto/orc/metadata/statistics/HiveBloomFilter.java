@@ -37,6 +37,13 @@ public class HiveBloomFilter
         this.numHashFunctions = numHashFunctions;
     }
 
+    public HiveBloomFilter(long[] bits, int numBits, int numHashFunctions)
+    {
+        this.bitSet = new BitSet(bits);
+        this.numBits = numBits;
+        this.numHashFunctions = numHashFunctions;
+    }
+    
     public HiveBloomFilter(BloomFilter bloomFilter)
     {
         this.bitSet = new BitSet(bloomFilter.getBitSet().clone());

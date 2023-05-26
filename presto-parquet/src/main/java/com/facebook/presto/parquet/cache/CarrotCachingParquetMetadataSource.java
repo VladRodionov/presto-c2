@@ -71,9 +71,6 @@ import com.carrot.cache.index.CompactBaseWithExpireIndexFormat;
 import com.carrot.cache.io.BaseDataWriter;
 import com.carrot.cache.io.BaseFileDataReader;
 import com.carrot.cache.io.BaseMemoryDataReader;
-import com.esotericsoftware.kryo.kryo5.Kryo;
-import com.esotericsoftware.kryo.kryo5.Serializer;
-import com.esotericsoftware.kryo.kryo5.SerializerFactory;
 import com.facebook.presto.parquet.ParquetDataSource;
 import com.facebook.presto.parquet.serde.BlockMetaDataSerializer;
 import com.facebook.presto.parquet.serde.ColumnChunkMetaDataSerializer;
@@ -201,8 +198,8 @@ public class CarrotCachingParquetMetadataSource implements ParquetMetadataSource
             .withRecyclingSelector(LRCRecyclingSelector.class.getName())
             .withDataWriter(BaseDataWriter.class.getName())
             .withMemoryDataReader(BaseMemoryDataReader.class.getName())
-            .withFileDataReader(BaseFileDataReader.class.getName())
-            .withMainQueueIndexFormat(CompactBaseWithExpireIndexFormat.class.getName());
+            .withFileDataReader(BaseFileDataReader.class.getName());
+            //.withMainQueueIndexFormat(CompactBaseWithExpireIndexFormat.class.getName());
 
         boolean admissionControllerEnabled = config.isCarrotAdmissionControllerEnabled();
         double ratio = config.getCarrotAdmissionControllerRatio();
@@ -236,8 +233,8 @@ public class CarrotCachingParquetMetadataSource implements ParquetMetadataSource
             .withRecyclingSelector(LRCRecyclingSelector.class.getName())
             .withDataWriter(BaseDataWriter.class.getName())
             .withMemoryDataReader(BaseMemoryDataReader.class.getName())
-            .withFileDataReader(BaseFileDataReader.class.getName())
-            .withMainQueueIndexFormat(CompactBaseWithExpireIndexFormat.class.getName());
+            .withFileDataReader(BaseFileDataReader.class.getName());
+            //.withMainQueueIndexFormat(CompactBaseWithExpireIndexFormat.class.getName());
 
         boolean admissionControllerEnabled = config.isCarrotAdmissionControllerEnabled();
         double ratio = config.getCarrotAdmissionControllerRatio();
@@ -298,26 +295,6 @@ public class CarrotCachingParquetMetadataSource implements ParquetMetadataSource
     cache.addKeyValueClasses(String.class, ParquetFileMetadata.class);
     ObjectCache.SerdeInitializationListener listener = (x) -> {
       
-//      @SuppressWarnings("rawtypes")
-//      SerializerFactory factory = new SerializerFactory() {
-//        @Override
-//        public Serializer<?> newSerializer(Kryo kryo, Class type) {
-//          return new ColumnChunkMetaDataSerializer();
-//        }
-//        @Override
-//        public boolean isSupported(Class type) {
-//          String className = type.getName();
-//          if (className.equals("org.apache.parquet.hadoop.metadata.IntColumnChunkMetaData") ||
-//              className.equals("org.apache.parquet.hadoop.metadata.LongColumnChunkMetaData")) {
-//            return true;
-//          } else {
-//            return false;
-//          }
-//        }
-//      };
-   
-//      x.setRegistrationRequired(false);
-//      x.setDefaultSerializer(factory);  
      
       // Level 0
       x.register(ParquetFileMetadata.class, new ParquetFileMetadataSerializer());

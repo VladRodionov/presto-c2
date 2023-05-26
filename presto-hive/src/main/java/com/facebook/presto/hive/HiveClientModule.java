@@ -52,8 +52,10 @@ import com.facebook.presto.orc.StripeReader.StripeId;
 import com.facebook.presto.orc.StripeReader.StripeStreamId;
 import com.facebook.presto.orc.UnsupportedEncryptionLibrary;
 import com.facebook.presto.orc.cache.CachingOrcFileTailSource;
+import com.facebook.presto.orc.cache.CarrotCachingOrcSource;
 import com.facebook.presto.orc.cache.OrcCacheConfig;
 import com.facebook.presto.orc.cache.OrcFileTailSource;
+import com.facebook.presto.orc.cache.OrcMetadataCacheType;
 import com.facebook.presto.orc.cache.StorageOrcFileTailSource;
 import com.facebook.presto.orc.metadata.OrcFileTail;
 import com.facebook.presto.orc.metadata.RowGroupIndex;
@@ -288,7 +290,8 @@ public class HiveClientModule
         int expectedFileTailSizeInBytes = toIntExact(orcCacheConfig.getExpectedFileTailSize().toBytes());
         boolean dwrfStripeCacheEnabled = orcCacheConfig.isDwrfStripeCacheEnabled();
         OrcFileTailSource orcFileTailSource = new StorageOrcFileTailSource(expectedFileTailSizeInBytes, dwrfStripeCacheEnabled);
-        if (orcCacheConfig.isFileTailCacheEnabled()) {
+        if (orcCacheConfig.getMetadataCacheType() == OrcMetadataCacheType.GUAVA) {
+          if (orcCacheConfig.isFileTailCacheEnabled()) {
             Cache<OrcDataSourceId, OrcFileTail> cache = CacheBuilder.newBuilder()
                     .maximumWeight(orcCacheConfig.getFileTailCacheSize().toBytes())
                     .weigher((id, tail) -> ((OrcFileTail) tail).getFooterSize() + ((OrcFileTail) tail).getMetadataSize())
@@ -298,8 +301,21 @@ public class HiveClientModule
             CacheStatsMBean cacheStatsMBean = new CacheStatsMBean(cache);
             orcFileTailSource = new CachingOrcFileTailSource(orcFileTailSource, cache);
             exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_OrcFileTail"), cacheStatsMBean);
+          }
+          return orcFileTailSource;
+        } else {
+          CarrotCachingOrcSource carrotSource = CarrotCachingOrcSource.getInstance(orcCacheConfig);
+          carrotSource.setOrcFileTailSource(orcFileTailSource);
+          com.facebook.presto.orc.cache.CarrotCachingOrcSource.CarrotCacheStatsMBean cacheStatsMBean =
+              carrotSource.getStatsMBean();
+          try {
+            exporter.export(generatedNameOf(com.facebook.presto.orc.cache.CarrotCachingOrcSource.CarrotCacheStatsMBean.class, 
+              connectorId + "_CarrotOrcMetadataCache"), cacheStatsMBean);
+          } catch (Exception e) {
+            // swallow - we can do it twice
+          }
+          return carrotSource;
         }
-        return orcFileTailSource;
     }
 
     @Singleton
@@ -307,7 +323,8 @@ public class HiveClientModule
     public StripeMetadataSourceFactory createStripeMetadataSourceFactory(OrcCacheConfig orcCacheConfig, MBeanExporter exporter)
     {
         StripeMetadataSource stripeMetadataSource = new StorageStripeMetadataSource();
-        if (orcCacheConfig.isStripeMetadataCacheEnabled()) {
+        if (orcCacheConfig.getMetadataCacheType() == OrcMetadataCacheType.GUAVA) {
+          if (orcCacheConfig.isStripeMetadataCacheEnabled()) {
             Cache<StripeId, Slice> footerCache = CacheBuilder.newBuilder()
                     .maximumWeight(orcCacheConfig.getStripeFooterCacheSize().toBytes())
                     .weigher((id, footer) -> toIntExact(((Slice) footer).getRetainedSize()))
@@ -337,6 +354,19 @@ public class HiveClientModule
                 exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_StripeStreamRowGroupIndex"), rowGroupIndexCacheStatsMBean);
             }
             stripeMetadataSource = new CachingStripeMetadataSource(stripeMetadataSource, footerCache, streamCache, rowGroupIndexCache);
+          }
+        } else {
+          CarrotCachingOrcSource carrotSource = CarrotCachingOrcSource.getInstance(orcCacheConfig);
+          carrotSource.setStripeMetadataSource(stripeMetadataSource);
+          com.facebook.presto.orc.cache.CarrotCachingOrcSource.CarrotCacheStatsMBean cacheStatsMBean =
+              carrotSource.getStatsMBean();
+          try {
+            exporter.export(generatedNameOf(com.facebook.presto.orc.cache.CarrotCachingOrcSource.CarrotCacheStatsMBean.class, 
+              connectorId + "_CarrotOrcMetadataCache"), cacheStatsMBean);
+          } catch (Exception e) {
+            // swallow - we can do it twice
+          }
+          stripeMetadataSource = carrotSource;
         }
         StripeMetadataSourceFactory factory = StripeMetadataSourceFactory.of(stripeMetadataSource);
         if (orcCacheConfig.isDwrfStripeCacheEnabled()) {
@@ -365,7 +395,7 @@ public class HiveClientModule
             parquetMetadataSource = new CarrotCachingParquetMetadataSource(parquetCacheConfig, parquetMetadataSource);
             CarrotCacheStatsMBean cacheStatsMBean = 
                 ((CarrotCachingParquetMetadataSource)parquetMetadataSource).getStatsMBean();
-            exporter.export(generatedNameOf(CarrotCacheStatsMBean.class, connectorId + "_ParquetMetadata"), cacheStatsMBean);
+            exporter.export(generatedNameOf(CarrotCacheStatsMBean.class, connectorId + "_CarrotParquetMetadataCache"), cacheStatsMBean);
           }
         }
         return parquetMetadataSource;

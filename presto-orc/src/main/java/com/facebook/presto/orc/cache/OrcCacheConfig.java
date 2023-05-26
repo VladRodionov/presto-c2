@@ -15,17 +15,24 @@ package com.facebook.presto.orc.cache;
 
 import com.facebook.airlift.configuration.Config;
 import com.facebook.airlift.configuration.ConfigDescription;
+
 import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.airlift.units.MinDataSize;
 import io.airlift.units.MinDuration;
+import io.airlift.units.DataSize.Unit;
 
 import static com.facebook.presto.orc.OrcDataSourceUtils.EXPECTED_FOOTER_SIZE_IN_BYTES;
 import static io.airlift.units.DataSize.Unit.BYTE;
 import static java.util.concurrent.TimeUnit.SECONDS;
 
+import java.net.URI;
+
 public class OrcCacheConfig
 {
+    
+    private OrcMetadataCacheType metadataCacheType = OrcMetadataCacheType.GUAVA;
+    
     private boolean fileTailCacheEnabled;
     private DataSize fileTailCacheSize = new DataSize(0, BYTE);
     private Duration fileTailCacheTtlSinceLastAccess = new Duration(0, SECONDS);
@@ -43,6 +50,241 @@ public class OrcCacheConfig
     private boolean dwrfStripeCacheEnabled;
     private DataSize expectedFileTailSize = new DataSize(EXPECTED_FOOTER_SIZE_IN_BYTES, BYTE);
 
+    /****************************************** 
+     * 
+     * Carrot configuration section 
+     * 
+     ******************************************/
+    
+    /** 
+     * 
+     * Used when cache type is CARROT_HYBRID 
+     * We need to have separate settings for OFFHEAP and FILE caches
+     * 
+     **/
+    private DataSize carrotOffheapMaxCacheSize = new DataSize(0, Unit.MEGABYTE);
+    
+    /**
+     * Carrot cache maximum size in CARROT_HYBRID mode
+     */
+    private DataSize carrotFileMaxCacheSize = new DataSize(0, Unit.MEGABYTE);
+    
+    private DataSize carrotOffheapDataSegmentSize = new DataSize(64, Unit.MEGABYTE);
+    
+    private DataSize carrotFileDataSegmentSize = new DataSize(256, Unit.MEGABYTE);
+    
+    private URI carrotCacheRootDir;
+    
+    private boolean carrotJMXMetricsEnabled;
+    
+    private String carrotJMXDomainName;
+    
+    private boolean carrotSaveOnShutdown = true;
+    
+    /**
+     * Used for cache type CARROT_FILE (CARROT_HYBRID)
+     */
+    private boolean carrotAdmissionControllerEnabled = false;
+    
+    /**
+     * Used for cache type CARROT_FILE (CARROT_HYBRID)
+     */
+    private double carrotAdmissionControllerRatio = 0.5;
+
+    
+    public OrcMetadataCacheType getMetadataCacheType() {
+      return metadataCacheType;
+    }
+    
+    @Config("orc.metadata-cache-type")
+    @ConfigDescription("Orc metadata cache type: GUAVA (default), CARROT_OFFHEAP, CARROT_FILE, CARROT_HYBRID")
+    public OrcCacheConfig setMetadataCacheType(OrcMetadataCacheType cacheType) {
+      metadataCacheType = cacheType;
+      return this;
+    }
+    
+    /*************************************
+     * 
+     * Carrot cache configuration section
+     * 
+     *************************************/
+    public DataSize getCarrotOffheapDataSegmentSize()
+    {
+        return this.carrotOffheapDataSegmentSize;
+    }
+    
+    /**
+     * Set carrot file cache segment size
+     * @param size segment size
+     * @return self
+     */
+    @Config("orc.carrot-offheap-data-segment-size")
+    @ConfigDescription("The data segment size for offheap cache")
+    public OrcCacheConfig setCarrotOffheapDataSegmentSize(DataSize size)
+    {
+        this.carrotOffheapDataSegmentSize = size;
+        return this;
+    }
+    
+    /**
+     * Get carrot file cache segment size
+     */
+    public DataSize getCarrotFileDataSegmentSize()
+    {
+        return this.carrotFileDataSegmentSize;
+    }
+    
+    @Config("orc.carrot-file-data-segment-size")
+    @ConfigDescription("The data segment size for file cache")
+    public OrcCacheConfig setCarrotFileDataSegmentSize(DataSize size)
+    {
+        this.carrotFileDataSegmentSize = size;
+        return this;
+    }
+    
+    @MinDataSize("0B")
+    public DataSize getCarrotOffheapMaxCacheSize()
+    {
+        return this.carrotOffheapMaxCacheSize;
+    }
+
+    @Config("orc.carrot-offheap-cache-size")
+    @ConfigDescription("Size of the parquet metadata carrot offheap cache")
+    public OrcCacheConfig setCarrotOffheapMaxCacheSize(DataSize offheapCacheSize)
+    {
+      this.carrotOffheapMaxCacheSize = offheapCacheSize;
+        return this;
+    }
+    @MinDataSize("0B")
+    public DataSize getCarrotFileMaxCacheSize()
+    {
+        return this.carrotFileMaxCacheSize;
+    }
+
+    @Config("orc.carrot-file-cache-size")
+    @ConfigDescription("Size of the parquet metadata carror file cache")
+    public OrcCacheConfig setCarrotFileMaxCacheSize(DataSize fileCacheSize)
+    {
+      this.carrotFileMaxCacheSize = fileCacheSize;
+      return this;
+    }
+  
+    /**
+     * Get carrot cache root directory
+     * @return root directory
+     */
+    public URI getCarrotCacheRootDir() {
+      return this.carrotCacheRootDir;
+    }
+    
+    /**
+     * Set carrot cache root directory
+     * @param dir root directory
+     * @return self
+     */
+    @Config("orc.carrot-cache-root-dir")
+    public OrcCacheConfig setCarrotCacheRootDir(URI dir) {
+      this.carrotCacheRootDir = dir;
+      return this;
+    }
+    
+    /**
+     * Is JMX metrics enabled
+     * @return true or false
+     */
+    public boolean isCarrotJMXMetricsEnabled() {
+      return carrotJMXMetricsEnabled;
+    }
+    
+    /**
+     * Set carrot JMX metrics enabled
+     * @param b true or false
+     * @return self
+     */
+    @Config("orc.carrot.jmx-metrics-enabled")
+    public OrcCacheConfig setCarrotJMXMetricsEnabled(boolean b) {
+      this.carrotJMXMetricsEnabled = b;
+      return this;
+    }
+    
+    /**
+     * Save cache on shutdown
+     * @return true or false
+     */
+    public boolean getCarrotCacheSaveOnShutdown() {
+      return this.carrotSaveOnShutdown;
+    }
+    
+    /**
+     * Set carrot cache save on shutdown
+     * @param b true or false
+     * @return self
+     */
+    @Config("orc.carrot-cache-save-on-shutdown")
+    public OrcCacheConfig setCarrotCacheSaveOnShutdown(boolean b) {
+      this.carrotSaveOnShutdown = b;
+      return this;
+    }
+    
+    /**
+     * Get Carrot JMX domain name 
+     * @return domain name
+     */
+    public String getCarrotJMXDomainName() {
+      return this.carrotJMXDomainName;
+    }
+    
+    /**
+     * Set carrot JMX domain name
+     * @param domainName domain name
+     * @return self
+     */
+    @Config("orc.carrot-jmx-domain-name")
+    public OrcCacheConfig setCarrotJMXDomainName(String domainName) {
+      this.carrotJMXDomainName = domainName;
+      return this;
+    }
+    
+    /**
+     * Is Carrot admission controller enabled
+     * @return true or false
+     */
+    public boolean isCarrotAdmissionControllerEnabled() {
+      return this.carrotAdmissionControllerEnabled;
+    }
+    
+    /**
+     * Set carrot admission controller enabled for file cache
+     * @param b true or false
+     * @return self
+     */
+    @Config("orc.carrot-admission-controller-enabled")
+    public OrcCacheConfig setCarrotAdmissionControllerEnabled(boolean b) {
+      this.carrotAdmissionControllerEnabled = b;
+      return this;
+    }
+    
+    /**
+     * Get carrot cache admission controller ratio
+     * @return ratio
+     */
+    public double getCarrotAdmissionControllerRatio() {
+      return this.carrotAdmissionControllerRatio;
+    }
+    
+    /**
+     *  Set Carrot admission controller ratio
+     * @param r ratio
+     * @return self
+     */
+    @Config("orc.carrot-admission-controller-ratio")
+    public OrcCacheConfig setCarrotAdmissionControllerRatio(double r) {
+      this.carrotAdmissionControllerRatio = r;
+      return this;
+    }
+    
+    /** End of Carrot configuration section */
+    
     public boolean isFileTailCacheEnabled()
     {
         return fileTailCacheEnabled;

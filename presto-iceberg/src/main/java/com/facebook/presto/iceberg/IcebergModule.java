@@ -53,11 +53,14 @@ import com.facebook.presto.orc.OrcDataSourceId;
 import com.facebook.presto.orc.StorageStripeMetadataSource;
 import com.facebook.presto.orc.StripeMetadataSource;
 import com.facebook.presto.orc.StripeMetadataSourceFactory;
-import com.facebook.presto.orc.StripeReader;
 import com.facebook.presto.orc.UnsupportedEncryptionLibrary;
+import com.facebook.presto.orc.StripeReader.StripeId;
+import com.facebook.presto.orc.StripeReader.StripeStreamId;
 import com.facebook.presto.orc.cache.CachingOrcFileTailSource;
+import com.facebook.presto.orc.cache.CarrotCachingOrcSource;
 import com.facebook.presto.orc.cache.OrcCacheConfig;
 import com.facebook.presto.orc.cache.OrcFileTailSource;
+import com.facebook.presto.orc.cache.OrcMetadataCacheType;
 import com.facebook.presto.orc.cache.StorageOrcFileTailSource;
 import com.facebook.presto.orc.metadata.OrcFileTail;
 import com.facebook.presto.orc.metadata.RowGroupIndex;
@@ -179,6 +182,27 @@ public class IcebergModule
                 daemonThreadsNamed("hive-metastore-iceberg-%s"));
     }
 
+//    @Singleton
+//    @Provides
+//    public OrcFileTailSource createOrcFileTailSource(OrcCacheConfig orcCacheConfig, MBeanExporter exporter)
+//    {
+//        int expectedFileTailSizeInBytes = toIntExact(orcCacheConfig.getExpectedFileTailSize().toBytes());
+//        boolean dwrfStripeCacheEnabled = orcCacheConfig.isDwrfStripeCacheEnabled();
+//        OrcFileTailSource orcFileTailSource = new StorageOrcFileTailSource(expectedFileTailSizeInBytes, dwrfStripeCacheEnabled);
+//        if (orcCacheConfig.isFileTailCacheEnabled()) {
+//            Cache<OrcDataSourceId, OrcFileTail> cache = CacheBuilder.newBuilder()
+//                    .maximumWeight(orcCacheConfig.getFileTailCacheSize().toBytes())
+//                    .weigher((id, tail) -> ((OrcFileTail) tail).getFooterSize() + ((OrcFileTail) tail).getMetadataSize())
+//                    .expireAfterAccess(orcCacheConfig.getFileTailCacheTtlSinceLastAccess().toMillis(), MILLISECONDS)
+//                    .recordStats()
+//                    .build();
+//            CacheStatsMBean cacheStatsMBean = new CacheStatsMBean(cache);
+//            orcFileTailSource = new CachingOrcFileTailSource(orcFileTailSource, cache);
+//            exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_OrcFileTail"), cacheStatsMBean);
+//        }
+//        return orcFileTailSource;
+//    }
+
     @Singleton
     @Provides
     public OrcFileTailSource createOrcFileTailSource(OrcCacheConfig orcCacheConfig, MBeanExporter exporter)
@@ -186,7 +210,8 @@ public class IcebergModule
         int expectedFileTailSizeInBytes = toIntExact(orcCacheConfig.getExpectedFileTailSize().toBytes());
         boolean dwrfStripeCacheEnabled = orcCacheConfig.isDwrfStripeCacheEnabled();
         OrcFileTailSource orcFileTailSource = new StorageOrcFileTailSource(expectedFileTailSizeInBytes, dwrfStripeCacheEnabled);
-        if (orcCacheConfig.isFileTailCacheEnabled()) {
+        if (orcCacheConfig.getMetadataCacheType() == OrcMetadataCacheType.GUAVA) {
+          if (orcCacheConfig.isFileTailCacheEnabled()) {
             Cache<OrcDataSourceId, OrcFileTail> cache = CacheBuilder.newBuilder()
                     .maximumWeight(orcCacheConfig.getFileTailCacheSize().toBytes())
                     .weigher((id, tail) -> ((OrcFileTail) tail).getFooterSize() + ((OrcFileTail) tail).getMetadataSize())
@@ -196,23 +221,79 @@ public class IcebergModule
             CacheStatsMBean cacheStatsMBean = new CacheStatsMBean(cache);
             orcFileTailSource = new CachingOrcFileTailSource(orcFileTailSource, cache);
             exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_OrcFileTail"), cacheStatsMBean);
+          }
+          return orcFileTailSource;
+        } else {
+          CarrotCachingOrcSource carrotSource = CarrotCachingOrcSource.getInstance(orcCacheConfig);
+          carrotSource.setOrcFileTailSource(orcFileTailSource);
+          com.facebook.presto.orc.cache.CarrotCachingOrcSource.CarrotCacheStatsMBean cacheStatsMBean =
+              carrotSource.getStatsMBean();
+          try {
+            exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_CarrotOrcMetadataCache"), cacheStatsMBean);
+          } catch (Exception e) {
+            // swallow - we can do it twice
+          }
+          return carrotSource;
         }
-        return orcFileTailSource;
     }
+
+//    @Singleton
+//    @Provides
+//    public StripeMetadataSourceFactory createStripeMetadataSourceFactory(OrcCacheConfig orcCacheConfig, MBeanExporter exporter)
+//    {
+//        StripeMetadataSource stripeMetadataSource = new StorageStripeMetadataSource();
+//        if (orcCacheConfig.isStripeMetadataCacheEnabled()) {
+//            Cache<StripeReader.StripeId, Slice> footerCache = CacheBuilder.newBuilder()
+//                    .maximumWeight(orcCacheConfig.getStripeFooterCacheSize().toBytes())
+//                    .weigher((id, footer) -> toIntExact(((Slice) footer).getRetainedSize()))
+//                    .expireAfterAccess(orcCacheConfig.getStripeFooterCacheTtlSinceLastAccess().toMillis(), MILLISECONDS)
+//                    .recordStats()
+//                    .build();
+//            Cache<StripeReader.StripeStreamId, Slice> streamCache = CacheBuilder.newBuilder()
+//                    .maximumWeight(orcCacheConfig.getStripeStreamCacheSize().toBytes())
+//                    .weigher((id, stream) -> toIntExact(((Slice) stream).getRetainedSize()))
+//                    .expireAfterAccess(orcCacheConfig.getStripeStreamCacheTtlSinceLastAccess().toMillis(), MILLISECONDS)
+//                    .recordStats()
+//                    .build();
+//            CacheStatsMBean footerCacheStatsMBean = new CacheStatsMBean(footerCache);
+//            CacheStatsMBean streamCacheStatsMBean = new CacheStatsMBean(streamCache);
+//            exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_StripeFooter"), footerCacheStatsMBean);
+//            exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_StripeStream"), streamCacheStatsMBean);
+//
+//            Optional<Cache<StripeReader.StripeStreamId, List<RowGroupIndex>>> rowGroupIndexCache = Optional.empty();
+//            if (orcCacheConfig.isRowGroupIndexCacheEnabled()) {
+//                rowGroupIndexCache = Optional.of(CacheBuilder.newBuilder()
+//                        .maximumWeight(orcCacheConfig.getRowGroupIndexCacheSize().toBytes())
+//                        .weigher((id, rowGroupIndices) -> toIntExact(((List<RowGroupIndex>) rowGroupIndices).stream().mapToLong(RowGroupIndex::getRetainedSizeInBytes).sum()))
+//                        .expireAfterAccess(orcCacheConfig.getStripeStreamCacheTtlSinceLastAccess().toMillis(), MILLISECONDS)
+//                        .recordStats()
+//                        .build());
+//                CacheStatsMBean rowGroupIndexCacheStatsMBean = new CacheStatsMBean(rowGroupIndexCache.get());
+//                exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_StripeStreamRowGroupIndex"), rowGroupIndexCacheStatsMBean);
+//            }
+//            stripeMetadataSource = new CachingStripeMetadataSource(stripeMetadataSource, footerCache, streamCache, rowGroupIndexCache);
+//        }
+//        StripeMetadataSourceFactory factory = StripeMetadataSourceFactory.of(stripeMetadataSource);
+//        if (orcCacheConfig.isDwrfStripeCacheEnabled()) {
+//            factory = new DwrfAwareStripeMetadataSourceFactory(factory);
+//        }
+//        return factory;
+//    }
 
     @Singleton
     @Provides
     public StripeMetadataSourceFactory createStripeMetadataSourceFactory(OrcCacheConfig orcCacheConfig, MBeanExporter exporter)
     {
         StripeMetadataSource stripeMetadataSource = new StorageStripeMetadataSource();
-        if (orcCacheConfig.isStripeMetadataCacheEnabled()) {
-            Cache<StripeReader.StripeId, Slice> footerCache = CacheBuilder.newBuilder()
+        if (orcCacheConfig.getMetadataCacheType() == OrcMetadataCacheType.GUAVA) {
+          if (orcCacheConfig.isStripeMetadataCacheEnabled()) {
+            Cache<StripeId, Slice> footerCache = CacheBuilder.newBuilder()
                     .maximumWeight(orcCacheConfig.getStripeFooterCacheSize().toBytes())
                     .weigher((id, footer) -> toIntExact(((Slice) footer).getRetainedSize()))
                     .expireAfterAccess(orcCacheConfig.getStripeFooterCacheTtlSinceLastAccess().toMillis(), MILLISECONDS)
                     .recordStats()
                     .build();
-            Cache<StripeReader.StripeStreamId, Slice> streamCache = CacheBuilder.newBuilder()
+            Cache<StripeStreamId, Slice> streamCache = CacheBuilder.newBuilder()
                     .maximumWeight(orcCacheConfig.getStripeStreamCacheSize().toBytes())
                     .weigher((id, stream) -> toIntExact(((Slice) stream).getRetainedSize()))
                     .expireAfterAccess(orcCacheConfig.getStripeStreamCacheTtlSinceLastAccess().toMillis(), MILLISECONDS)
@@ -223,7 +304,7 @@ public class IcebergModule
             exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_StripeFooter"), footerCacheStatsMBean);
             exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_StripeStream"), streamCacheStatsMBean);
 
-            Optional<Cache<StripeReader.StripeStreamId, List<RowGroupIndex>>> rowGroupIndexCache = Optional.empty();
+            Optional<Cache<StripeStreamId, List<RowGroupIndex>>> rowGroupIndexCache = Optional.empty();
             if (orcCacheConfig.isRowGroupIndexCacheEnabled()) {
                 rowGroupIndexCache = Optional.of(CacheBuilder.newBuilder()
                         .maximumWeight(orcCacheConfig.getRowGroupIndexCacheSize().toBytes())
@@ -235,6 +316,18 @@ public class IcebergModule
                 exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_StripeStreamRowGroupIndex"), rowGroupIndexCacheStatsMBean);
             }
             stripeMetadataSource = new CachingStripeMetadataSource(stripeMetadataSource, footerCache, streamCache, rowGroupIndexCache);
+          }
+        } else {
+          CarrotCachingOrcSource carrotSource = CarrotCachingOrcSource.getInstance(orcCacheConfig);
+          carrotSource.setStripeMetadataSource(stripeMetadataSource);
+          com.facebook.presto.orc.cache.CarrotCachingOrcSource.CarrotCacheStatsMBean cacheStatsMBean =
+              carrotSource.getStatsMBean();
+          try {
+            exporter.export(generatedNameOf(CacheStatsMBean.class, connectorId + "_CarrotOrcMetadataCache"), cacheStatsMBean);
+          } catch (Exception e) {
+            // swallow - we can do it twice
+          }
+          stripeMetadataSource = carrotSource;
         }
         StripeMetadataSourceFactory factory = StripeMetadataSourceFactory.of(stripeMetadataSource);
         if (orcCacheConfig.isDwrfStripeCacheEnabled()) {

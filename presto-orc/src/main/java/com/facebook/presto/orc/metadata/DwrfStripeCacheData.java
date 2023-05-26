@@ -28,14 +28,40 @@ public class DwrfStripeCacheData
     private final Slice cacheSlice;
     private final int cacheSliceSize;
     private final DwrfStripeCacheMode mode;
-
+    private int origOffset;
+    
     public DwrfStripeCacheData(Slice stripeCacheSlice, int stripeCacheSize, DwrfStripeCacheMode stripeCacheMode)
     {
         this.cacheSlice = requireNonNull(stripeCacheSlice, "stripeCacheSlice is null");
         this.cacheSliceSize = stripeCacheSize;
         this.mode = requireNonNull(stripeCacheMode, "stripeCacheMode is null");
+        this.origOffset = offset();
     }
 
+    @SuppressWarnings({ "restriction", "unused" })
+    private int offset() {
+      // We expect byte array as the base
+      byte[] base = (byte[]) cacheSlice.getBase();
+      origOffset = (int)(cacheSlice.getAddress() - sun.misc.Unsafe.ARRAY_BYTE_BASE_OFFSET);
+      return origOffset;
+    }
+
+    /**
+     * Constructor for cached version 
+     * @param stripeCacheSlice
+     * @param stripeCacheSize
+     * @param stripeCacheMode
+     * @param origOffset
+     */
+    public DwrfStripeCacheData(Slice stripeCacheSlice, int stripeCacheSize, DwrfStripeCacheMode stripeCacheMode, 
+        int origOffset)
+    {
+        this.cacheSlice = requireNonNull(stripeCacheSlice, "stripeCacheSlice is null");
+        this.cacheSliceSize = stripeCacheSize;
+        this.mode = requireNonNull(stripeCacheMode, "stripeCacheMode is null");
+        this.origOffset = origOffset;
+    }
+    
     public Slice getDwrfStripeCacheSlice()
     {
         return cacheSlice;
@@ -51,6 +77,10 @@ public class DwrfStripeCacheData
         return mode;
     }
 
+    public int getOriginalOffset() {
+      return origOffset;
+    }
+    
     public DwrfStripeCache buildDwrfStripeCache(List<StripeInformation> stripes, List<Integer> cacheOffsets)
     {
         // AbstractOrcRecordReader sorts stripes by position, so probably there
@@ -92,6 +122,7 @@ public class DwrfStripeCacheData
     {
         int sliceOffset = cacheOffsets.get(cacheOffsetIdx);
         int sliceSize = cacheOffsets.get(cacheOffsetIdx + 1) - sliceOffset;
+        sliceOffset -= origOffset;
         checkState(sliceOffset < cacheSlice.length(),
                 "stripe cache offset %s is out of bound for cache slice of size %s",
                 sliceOffset,
